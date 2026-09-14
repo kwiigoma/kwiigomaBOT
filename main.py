@@ -477,14 +477,20 @@ async def battle_start(i, 相手: discord.Member):
 
     c = db()
     # 同じ相手への重複招待を防ぐ。
-    existing = c.execute("SELECT 1 FROM battle_invites WHERE inviter=? AND invitee=? AND status='pending'", (i.user.id, 相手.id)).fetchone()
+    existing = c.execute("SELECT 1 FROM battle_invites WHERE status='pending' AND ((inviter=? AND invitee=?) OR (inviter=? AND invitee=?))", (i.user.id, 相手.id, 相手.id, i.user.id)).fetchone()
     if existing:
         c.close()
         await i.response.send_message("📨 すでにその相手へBattle招待を送っています。", ephemeral=True); return
-    invite_id = f"I{random.randrange(0x1000000):06X}"
-    c.execute("INSERT INTO battle_invites(invite_id,inviter,invitee,status,created_at) VALUES(?,?,?,?,?)",
-              (invite_id,i.user.id,相手.id,'pending',datetime.now(timezone.utc).isoformat()))
-    c.commit(); c.close()
+    invite_id = f"I{i.id}"  # DiscordのInteraction IDを使い、同じ実行が二重になっても同じ招待IDになる
+    try:
+        c.execute("INSERT INTO battle_invites(invite_id,inviter,invitee,status,created_at) VALUES(?,?,?,?,?)",
+                  (invite_id,i.user.id,相手.id,'pending',datetime.now(timezone.utc).isoformat()))
+        c.commit()
+    except sqlite3.IntegrityError:
+        c.close()
+        await i.response.send_message("📨 このBattle招待はすでに送信処理済みです。", ephemeral=True)
+        return
+    c.close()
 
     view = BattleInviteView(invite_id, i.user.id, 相手.id)
     try:
@@ -511,8 +517,13 @@ class BattleInviteView(discord.ui.View):
         self.inviter_id = inviter_id
         self.invitee_id = invitee_id
         # ボタンを明示的に作成して、承認/拒否の処理が入れ替わらないようにする。
-        self.add_item(BattleInviteAcceptButton(self))
-        self.add_item(BattleInviteRejectButton(self))
+        self.accept_button = BattleInviteAcceptButton(self)
+        self.reject_button = BattleInviteRejectButton(self)
+        self.delete_button = BattleInviteDeleteButton(self)
+        self.delete_button.disabled = True
+        self.add_item(self.accept_button)
+        self.add_item(self.reject_button)
+        self.add_item(self.delete_button)
 
     async def finish_invite(self, interaction, accepted: bool):
         if interaction.user.id != self.invitee_id:
@@ -530,9 +541,10 @@ class BattleInviteView(discord.ui.View):
             c.execute("UPDATE battle_invites SET status='rejected' WHERE invite_id=? AND status='pending'", (self.invite_id,))
             c.commit()
             c.close()
-            for child in self.children:
-                child.disabled = True
-            await interaction.response.edit_message(content="🚫 **Battle招待を拒否しました。**\nこの対戦は開始されません。", view=self)
+            self.accept_button.disabled = True
+            self.reject_button.disabled = True
+            self.delete_button.disabled = False
+            await interaction.response.edit_message(content="🚫 **Battle招待を拒否しました。**\nこの対戦は開始されません。\n\n🗑️ メッセージを消す場合は下のボタンを押してください。", view=self)
             try:
                 inviter = await bot.fetch_user(self.inviter_id)
                 await inviter.send(f"🚫 **{interaction.user.display_name}** がBattle招待を拒否しました。")
@@ -560,9 +572,10 @@ class BattleInviteView(discord.ui.View):
         c.commit()
         c.close()
 
-        for child in self.children:
-            child.disabled = True
-        await interaction.response.edit_message(content="✅ **Battle招待を承認しました！Battle開始！**", view=self)
+        self.accept_button.disabled = True
+        self.reject_button.disabled = True
+        self.delete_button.disabled = False
+        await interaction.response.edit_message(content="✅ **Battle招待を承認しました！Battle開始！**\n\n🗑️ メッセージを消す場合は下のボタンを押してください。", view=self)
         q_user = await bot.fetch_user(questioner)
         a_user = await bot.fetch_user(answerer)
         try:
@@ -592,6 +605,28 @@ class BattleInviteAcceptButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         await self.invite_view.finish_invite(interaction, True)
+
+
+class BattleInviteDeleteButton(discord.ui.Button):
+    def __init__(self, view):
+        super().__init__(label='このメッセージを削除', style=discord.ButtonStyle.secondary, emoji='🗑️', row=1)
+        self.invite_view = view
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.invite_view.invitee_id:
+            await interaction.response.send_message("❌ この招待メッセージを削除できるのは招待された本人だけです。", ephemeral=True)
+            return
+        c = db()
+        row = c.execute("SELECT status FROM battle_invites WHERE invite_id=?", (self.invite_view.invite_id,)).fetchone()
+        c.close()
+        if not row or row[0] not in ('accepted', 'rejected'):
+            await interaction.response.send_message("⚠️ 先に承認または拒否を選択してください。", ephemeral=True)
+            return
+        await interaction.response.defer()
+        try:
+            await interaction.message.delete()
+        except Exception:
+            pass
 
 
 class BattleInviteRejectButton(discord.ui.Button):
