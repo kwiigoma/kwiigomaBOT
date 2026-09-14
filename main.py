@@ -1,6 +1,6 @@
-# kwiigonaBOT v2
-# 個人情報・個人進行に関わるコマンドは原則エフェメラル表示。
-# 共有情報（ランキング、会社情報、会社一覧、市場）は通常表示。
+# kwiigonaBOT v8
+# Botの返信はすべてエフェメラル（実行者本人のみ表示）。
+# 会社削除・チャンネル削除を追加。
 import os, random, sqlite3, math
 from datetime import datetime, date, timedelta, timezone
 import discord
@@ -50,7 +50,9 @@ async def help_cmd(i):
     e=discord.Embed(title='🤖 kwiigonaBOT',description='ゲーム・YouTuber・会社経営をまとめたBot')
     e.add_field(name='🎁 GomaLog',value='/gomalog /gomalog_rank /gomalog_collection',inline=False)
     e.add_field(name='🎥 くぃチューバー',value='/yt_start /yt_status /yt_post /yt_train',inline=False)
-    e.add_field(name='📈 株・会社',value='/会社設立 /会社情報 /会社一覧 /市場 /株購入 /株売却 /ポートフォリオ /資産',inline=False)
+    e.add_field(name='📈 株・会社',value='/会社設立 /会社情報 /会社一覧 /市場 /株購入 /株売却 /ポートフォリオ /資産 /会社削除',inline=False)
+    e.add_field(name='🔄 リセット',value='/チャンネル削除（自分のチャンネルを削除）',inline=False)
+    e.add_field(name='⚔️ Battle',value='/battle /battle質問 /battle回答 /battle推理 /battleアイテム /battleステータス /battleランキング /battleランダム /battleランクマッチ',inline=False)
     await i.response.send_message(embed=e, ephemeral=True)
 
 @bot.tree.command(name='money',description='ゲーム内資金を確認')
@@ -63,7 +65,8 @@ async def gomalog(i):
     streak=(r[1]+1) if r and r[0] and date.fromisoformat(r[0])==date.today()-timedelta(days=1) else 1
     grade,item,reward,rare=weighted_reward()
     x.execute('INSERT INTO gomalog(user_id,last_date,streak,max_streak,total_claims,total_rares) VALUES(?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET last_date=excluded.last_date,streak=excluded.streak,max_streak=MAX(gomalog.max_streak,excluded.streak),total_claims=gomalog.total_claims+1,total_rares=gomalog.total_rares+excluded.total_rares',(i.user.id,today,streak,streak,1,rare))
-    x.execute('INSERT INTO collections(user_id,item,count) VALUES(?,?,1) ON CONFLICT(user_id,item) DO UPDATE SET count=count+1',(i.user.id,item)); c.commit(); c.close(); change_money(i.user.id,reward)
+    x.execute('INSERT INTO collections(user_id,item,count) VALUES(?,?,1) ON CONFLICT(user_id,item) DO UPDATE SET count=count+1',(i.user.id,item)); c.commit(); c.close();
+    ensure_economies(i.user.id); add_gomalog_points(i.user.id,reward)
     await i.response.send_message(f'🎁 **GomaLog**\nランク：**{grade}**\n報酬：**{item}**\n獲得：**{yen(reward)}**\n🔥 連続：**{streak}日**', ephemeral=True)
 
 @bot.tree.command(name='gomalog_rank',description='GomaLogランキング')
@@ -158,7 +161,556 @@ async def market(i):
 
 @bot.tree.command(name='資産',description='総資産を確認')
 async def assets(i):
-    ensure_user(i.user); c=db(); r=c.execute('SELECT COALESCE(SUM(h.shares*c.share_price),0) FROM holdings h JOIN companies c ON c.id=h.company_id WHERE h.user_id=?',(i.user.id,)).fetchone(); c.close(); cash=money(i.user.id); stocks=r[0] or 0; await i.response.send_message(f'💰 **総資産**\n現金：{yen(cash)}\n株式：{yen(stocks)}\n**合計：{yen(cash+stocks)}**', ephemeral=True)
+    ensure_user(i.user); c=db(); r=c.execute('SELECT COALESCE(SUM(h.shares*c.share_price),0) FROM holdings h JOIN companies c ON c.id=h.company_id WHERE h.user_id=?',(i.user.id,)).fetchone(); c.close(); cash=money(i.user.id); stocks=r[0] or 0; ensure_battle_profile(i.user.id); c=db(); br=c.execute('SELECT battle_points FROM battle_profiles WHERE user_id=?',(i.user.id,)).fetchone(); c.close(); bp=br[0] if br else 0; await i.response.send_message(
+        f"💰 **総合資産**\n"
+        f"🎥 YouTube資金：**{yen(youtube_money(i.user.id))}**\n"
+        f"🏢 会社・株式：**{yen(cash+stocks)}**\n"
+        f"🎁 GomaLogポイント：**{gomalog_points(i.user.id)}**\n"
+        f"⚔️ Battle Point：**{bp}**",
+        ephemeral=True
+    )
+
+
+@bot.tree.command(name='会社削除',description='自分の会社を削除')
+async def delete_company(i):
+    ensure_user(i.user)
+    c=db()
+    r=c.execute('SELECT id,name,share_price FROM companies WHERE owner_id=?',(i.user.id,)).fetchone()
+    if not r:
+        c.close()
+        await i.response.send_message('🏢 あなたが所有する会社はありません。', ephemeral=True)
+        return
+    cid,name,price=r
+    # Current shareholders are bought out at the current market price before deletion.
+    holders=c.execute('SELECT user_id,shares FROM holdings WHERE company_id=? AND shares>0',(cid,)).fetchall()
+    refund=sum(uid_shares[1]*price for uid_shares in holders)
+    for uid,shares in holders:
+        c.execute('UPDATE users SET money=money+? WHERE user_id=?',(shares*price,uid))
+    c.execute('DELETE FROM holdings WHERE company_id=?',(cid,))
+    c.execute('DELETE FROM companies WHERE id=?',(cid,))
+    c.commit(); c.close()
+    await i.response.send_message(
+        f'🗑️ **{name}** を削除しました。\n'
+        f'保有者には現在株価 **{yen(price)}** で自動精算しました。\n'
+        f'精算総額：**{yen(refund)}**',
+        ephemeral=True
+    )
+
+@bot.tree.command(name='チャンネル削除',description='自分のくぃチューバーチャンネルを削除')
+async def delete_channel(i):
+    ensure_user(i.user)
+    c=db()
+    r=c.execute('SELECT subscribers,views,videos FROM youtubers WHERE user_id=?',(i.user.id,)).fetchone()
+    if not r:
+        c.close()
+        await i.response.send_message('🎥 あなたのくぃチューバーチャンネルはありません。', ephemeral=True)
+        return
+    c.execute('DELETE FROM youtubers WHERE user_id=?',(i.user.id,))
+    c.commit(); c.close()
+    await i.response.send_message(
+        '🗑️ **くぃチューバーチャンネルを削除しました。**\n'
+        '登録者・再生数・動画数・収益などのチャンネル進行をリセットしました。',
+        ephemeral=True
+    )
+
+
+
+# =========================
+# 💰 Separate Game Economies
+# =========================
+# YouTube money, company money, and GomaLog points are kept separate.
+# Battle Points are already stored separately in battle_profiles.
+
+def init_separate_economies():
+    c = db()
+    c.execute("""CREATE TABLE IF NOT EXISTS youtube_wallets(
+        user_id INTEGER PRIMARY KEY,
+        balance INTEGER NOT NULL DEFAULT 0
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS gomalog_wallets(
+        user_id INTEGER PRIMARY KEY,
+        points INTEGER NOT NULL DEFAULT 0
+    )""")
+    # Company/stock cash is stored in the existing users.money field.
+    c.commit()
+    c.close()
+
+def ensure_economies(user_id):
+    c = db()
+    c.execute("INSERT OR IGNORE INTO youtube_wallets(user_id) VALUES(?)", (user_id,))
+    c.execute("INSERT OR IGNORE INTO gomalog_wallets(user_id) VALUES(?)", (user_id,))
+    c.commit()
+    c.close()
+
+def youtube_money(user_id):
+    ensure_economies(user_id)
+    c = db()
+    r = c.execute("SELECT balance FROM youtube_wallets WHERE user_id=?", (user_id,)).fetchone()
+    c.close()
+    return r[0] if r else 0
+
+def add_youtube_money(user_id, amount):
+    ensure_economies(user_id)
+    c = db()
+    c.execute("UPDATE youtube_wallets SET balance=MAX(0,balance+?) WHERE user_id=?", (amount,user_id))
+    c.commit()
+    c.close()
+
+def gomalog_points(user_id):
+    ensure_economies(user_id)
+    c = db()
+    r = c.execute("SELECT points FROM gomalog_wallets WHERE user_id=?", (user_id,)).fetchone()
+    c.close()
+    return r[0] if r else 0
+
+def add_gomalog_points(user_id, amount):
+    ensure_economies(user_id)
+    c = db()
+    c.execute("UPDATE gomalog_wallets SET points=MAX(0,points+?) WHERE user_id=?", (amount,user_id))
+    c.commit()
+    c.close()
+
+init_separate_economies()
+
+# =========================
+# ⚔️ kwiigonaBOT Battle v8
+# 「アキネーター風」の対人推理バトル。
+# お題はBotが自動選択し、プレイヤー同士で質問・回答・推理を行う。
+# =========================
+
+BATTLE_TOPIC_DATA = {
+    "食べ物": ["りんご","バナナ","カレー","ラーメン","ピザ","アイス","寿司","ハンバーガー","ケーキ","おにぎり"],
+    "動物": ["猫","犬","ペンギン","イルカ","ライオン","パンダ","うさぎ","キリン","ゾウ","カメ"],
+    "乗り物": ["自転車","電車","新幹線","飛行機","船","バス","タクシー","バイク","ヘリコプター","ロケット"],
+    "電子機器": ["スマートフォン","パソコン","テレビ","カメラ","イヤホン","ゲーム機","タブレット","スマートウォッチ","キーボード","マウス"],
+    "場所": ["学校","病院","コンビニ","映画館","公園","駅","空港","図書館","遊園地","水族館"],
+    "日用品": ["傘","時計","リュック","財布","眼鏡","ペン","ノート","椅子","机","リモコン"],
+    "趣味・娯楽": ["映画","ゲーム","漫画","小説","ギター","サッカーボール","トランプ","カラオケ","写真","プラモデル"],
+    "自然・科学": ["海","山","太陽","月","星","宇宙","火山","雪","雲","虹"],
+    "ファンタジー": ["ドラゴン","魔法使い","妖精","勇者","魔法の杖","モンスター","城","宝箱","宇宙人","ロボット"],
+}
+BATTLE_TOPICS = [x for group in BATTLE_TOPIC_DATA.values() for x in group]
+BATTLE_TOPIC_CATEGORY = {topic: category for category, items in BATTLE_TOPIC_DATA.items() for topic in items}
+
+BATTLE_ITEM_POOL = [
+    ("攻撃", "追加質問カード"),
+    ("攻撃", "ヒントカード"),
+    ("攻撃", "回答強制カード"),
+    ("防御", "ガードカード"),
+    ("防御", "質問変更カード"),
+    ("防御", "情報隠蔽カード"),
+]
+BATTLE_ITEM_CHOICES = [app_commands.Choice(name=n, value=n) for _, n in BATTLE_ITEM_POOL]
+
+BATTLE_RANKS = [
+    ("Bronze", 0), ("Silver", 800), ("Gold", 1100),
+    ("Platinum", 1400), ("Diamond", 1700), ("Master", 2000),
+    ("Grand Master", 2300),
+]
+
+def battle_rank(rating):
+    result = BATTLE_RANKS[0][0]
+    for name, threshold in BATTLE_RANKS:
+        if rating >= threshold:
+            result = name
+    return result
+
+def init_battle_tables():
+    c = db()
+    c.execute("""CREATE TABLE IF NOT EXISTS battle_profiles(
+        user_id INTEGER PRIMARY KEY,
+        rating INTEGER NOT NULL DEFAULT 1000,
+        wins INTEGER NOT NULL DEFAULT 0,
+        losses INTEGER NOT NULL DEFAULT 0,
+        streak INTEGER NOT NULL DEFAULT 0,
+        best_streak INTEGER NOT NULL DEFAULT 0,
+        battle_points INTEGER NOT NULL DEFAULT 0,
+        total_games INTEGER NOT NULL DEFAULT 0
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS battle_items(
+        user_id INTEGER NOT NULL,
+        item_name TEXT NOT NULL,
+        item_type TEXT NOT NULL,
+        quantity INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(user_id,item_name)
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS battle_matches(
+        match_id TEXT PRIMARY KEY,
+        player1 INTEGER NOT NULL,
+        player2 INTEGER NOT NULL,
+        player1_topic TEXT,
+        player2_topic TEXT,
+        turn_user INTEGER,
+        status TEXT NOT NULL DEFAULT 'waiting',
+        player1_questions INTEGER NOT NULL DEFAULT 0,
+        player2_questions INTEGER NOT NULL DEFAULT 0,
+        winner INTEGER,
+        created_at TEXT NOT NULL,
+        last_question TEXT,
+        last_question_from INTEGER,
+        extra_question_user INTEGER,
+        forced_unknown_user INTEGER,
+        hidden_hint_user INTEGER,
+        pending_change_user INTEGER,
+        force_binary_user INTEGER
+    )""")
+    # v6/v7 の既存DBから安全に移行。
+    existing = {row[1] for row in c.execute("PRAGMA table_info(battle_matches)").fetchall()}
+    migrations = {
+        "last_question": "TEXT",
+        "last_question_from": "INTEGER",
+        "extra_question_user": "INTEGER",
+        "forced_unknown_user": "INTEGER",
+        "hidden_hint_user": "INTEGER",
+        "pending_change_user": "INTEGER",
+        "force_binary_user": "INTEGER",
+    }
+    for col, definition in migrations.items():
+        if col not in existing:
+            c.execute(f"ALTER TABLE battle_matches ADD COLUMN {col} {definition}")
+    c.execute("""CREATE TABLE IF NOT EXISTS battle_queue(
+        user_id INTEGER PRIMARY KEY,
+        server_id INTEGER NOT NULL,
+        queued_at TEXT NOT NULL,
+        ranked INTEGER NOT NULL DEFAULT 0
+    )""")
+    existing_q = {row[1] for row in c.execute("PRAGMA table_info(battle_queue)").fetchall()}
+    if "ranked" not in existing_q:
+        c.execute("ALTER TABLE battle_queue ADD COLUMN ranked INTEGER NOT NULL DEFAULT 0")
+    c.commit()
+    c.close()
+
+def ensure_battle_profile(user_id):
+    c = db()
+    c.execute("INSERT OR IGNORE INTO battle_profiles(user_id) VALUES(?)", (user_id,))
+    c.commit()
+    c.close()
+
+def give_battle_item(user_id):
+    item_type, item_name = random.choice(BATTLE_ITEM_POOL)
+    c = db()
+    c.execute("""INSERT INTO battle_items(user_id,item_name,item_type,quantity)
+                 VALUES(?,?,?,1)
+                 ON CONFLICT(user_id,item_name) DO UPDATE SET quantity=quantity+1""",
+              (user_id,item_name,item_type))
+    c.commit(); c.close()
+    return item_type, item_name
+
+def consume_battle_item(user_id, item_name):
+    c = db()
+    r = c.execute("SELECT item_type,quantity FROM battle_items WHERE user_id=? AND item_name=?", (user_id,item_name)).fetchone()
+    if not r or r[1] <= 0:
+        c.close(); return None
+    c.execute("UPDATE battle_items SET quantity=quantity-1 WHERE user_id=? AND item_name=?", (user_id,item_name))
+    c.commit(); c.close()
+    return r[0]
+
+def battle_change_rating(winner_id, loser_id):
+    c = db()
+    w = c.execute("SELECT rating FROM battle_profiles WHERE user_id=?", (winner_id,)).fetchone()
+    l = c.execute("SELECT rating FROM battle_profiles WHERE user_id=?", (loser_id,)).fetchone()
+    wr, lr = (w[0] if w else 1000), (l[0] if l else 1000)
+    expected_w = 1 / (1 + 10 ** ((lr - wr) / 400))
+    delta = max(10, min(32, round(24 * (1 - expected_w) + 10)))
+    c.execute("""UPDATE battle_profiles SET rating=rating+?, wins=wins+1,
+                 total_games=total_games+1, streak=streak+1,
+                 best_streak=MAX(best_streak,streak+1), battle_points=battle_points+100
+                 WHERE user_id=?""", (delta,winner_id))
+    c.execute("""UPDATE battle_profiles SET rating=MAX(0,rating-?), losses=losses+1,
+                 total_games=total_games+1, streak=0, battle_points=MAX(0,battle_points+30)
+                 WHERE user_id=?""", (delta,loser_id))
+    c.commit(); c.close()
+    return delta
+
+def battle_get_active(user_id):
+    c = db()
+    r = c.execute("""SELECT * FROM battle_matches
+                    WHERE (player1=? OR player2=?) AND status='active'
+                    ORDER BY created_at DESC LIMIT 1""", (user_id,user_id)).fetchone()
+    c.close()
+    return r
+
+def battle_other(match, user_id):
+    return match[2] if match[1] == user_id else match[1]
+
+def battle_topic_for(match, user_id):
+    return match[3] if match[1] == user_id else match[4]
+
+init_battle_tables()
+
+@bot.tree.command(name='battle', description='友達と推理バトルを開始')
+@app_commands.describe(相手='対戦する相手')
+async def battle_start(i, 相手: discord.Member):
+    ensure_battle_profile(i.user.id); ensure_battle_profile(相手.id)
+    if 相手.id == i.user.id:
+        await i.response.send_message("⚔️ 自分自身とは対戦できません。", ephemeral=True); return
+    if 相手.bot:
+        await i.response.send_message("🤖 Botとは対戦できません。", ephemeral=True); return
+    if battle_get_active(i.user.id) or battle_get_active(相手.id):
+        await i.response.send_message("⚔️ どちらかがすでにBattle中です。", ephemeral=True); return
+
+    match_id = f"B{random.randrange(0x1000000):06X}"
+    topic1 = random.choice(BATTLE_TOPICS)
+    topic2 = random.choice(BATTLE_TOPICS)
+    while topic2 == topic1:
+        topic2 = random.choice(BATTLE_TOPICS)
+    c = db()
+    c.execute("""INSERT INTO battle_matches
+        (match_id,player1,player2,player1_topic,player2_topic,turn_user,status,created_at)
+        VALUES(?,?,?,?,?,?,?,?)""",
+        (match_id,i.user.id,相手.id,topic1,topic2,i.user.id,"active",datetime.now(timezone.utc).isoformat()))
+    c.commit(); c.close()
+
+    await i.response.send_message(
+        f"⚔️ **Battle開始！**\n対戦相手：**{相手.display_name}**\n対戦ID：`{match_id}`\n\n"
+        f"🧠 あなたのお題はBotが秘密裏に決定しました。\n"
+        f"❓ あなたが先攻です。`/battle質問` で質問してください。\n"
+        f"🎯 `/battle推理` でいつでも推理できます。\n"
+        f"🎒 アイテムは `/battleアイテム` と `/battleアイテム使用` から使えます。",
+        ephemeral=True)
+    try:
+        await 相手.send(
+            f"⚔️ **Battle開始！**\n対戦相手：**{i.user.display_name}**\n対戦ID：`{match_id}`\n\n"
+            f"🧠 あなたのお題はBotが秘密裏に決定しました。\n"
+            f"⏳ 相手が先攻です。質問が届くまで待ってください。\n"
+            f"🎯 `/battle推理` でいつでも推理できます。")
+    except Exception:
+        pass
+
+@bot.tree.command(name='battle質問', description='相手のお題を推理する質問を送る')
+@app_commands.describe(質問='YES/NOで答えられる質問がおすすめです')
+async def battle_question(i, 質問: str):
+    match = battle_get_active(i.user.id)
+    if not match:
+        await i.response.send_message("⚔️ 現在参加中のBattleはありません。", ephemeral=True); return
+    if match[5] != i.user.id:
+        await i.response.send_message("⏳ 今は相手のターンです。", ephemeral=True); return
+    if len(質問.strip()) < 1 or len(質問) > 120:
+        await i.response.send_message("❌ 質問は1～120文字です。", ephemeral=True); return
+    p1q,p2q = match[7],match[8]
+    count = p1q if match[1] == i.user.id else p2q
+    if count >= 20:
+        await i.response.send_message("❌ 1人20問までです。", ephemeral=True); return
+    other = battle_other(match,i.user.id)
+    c = db()
+    if match[1] == i.user.id:
+        c.execute("UPDATE battle_matches SET player1_questions=player1_questions+1,turn_user=?,last_question=?,last_question_from=? WHERE match_id=?", (other,質問.strip(),i.user.id,match[0]))
+    else:
+        c.execute("UPDATE battle_matches SET player2_questions=player2_questions+1,turn_user=?,last_question=?,last_question_from=? WHERE match_id=?", (other,質問.strip(),i.user.id,match[0]))
+    c.commit(); c.close()
+    await i.response.send_message(f"❓ 質問を送信しました。\n> {質問.strip()}\n\n相手の回答を待っています。", ephemeral=True)
+    try:
+        await (await bot.fetch_user(other)).send(
+            f"⚔️ **Battle `{match[0]}`**\n"
+            f"❓ 相手から質問です：\n> {質問.strip()}\n\n"
+            f"`/battle回答` で **YES / NO / わからない** を選んでください。")
+    except Exception:
+        pass
+
+@bot.tree.command(name='battle回答', description='相手からの質問に答える')
+@app_commands.choices(回答=[
+    app_commands.Choice(name='YES',value='YES'),
+    app_commands.Choice(name='NO',value='NO'),
+    app_commands.Choice(name='わからない',value='UNKNOWN')])
+async def battle_answer(i, 回答: app_commands.Choice[str]):
+    match = battle_get_active(i.user.id)
+    if not match:
+        await i.response.send_message("⚔️ 現在参加中のBattleはありません。", ephemeral=True); return
+    if match[5] == i.user.id or not match[11] or match[12] != i.user.id:
+        await i.response.send_message("⏳ 今は回答する質問がありません。", ephemeral=True); return
+
+    answer = 回答.value
+    forced_unknown = match[14] == i.user.id
+    force_binary = match[17] == i.user.id
+    if force_binary and answer == "UNKNOWN":
+        await i.response.send_message("🎯 回答強制カードの効果中です。今回は **YES / NO** のどちらかを選んでください。", ephemeral=True)
+        return
+    if forced_unknown:
+        answer = "UNKNOWN"
+    extra = match[13] == i.user.id
+    c = db()
+    c.execute("UPDATE battle_matches SET forced_unknown_user=NULL,force_binary_user=NULL WHERE match_id=?", (match[0],))
+    if extra:
+        c.execute("UPDATE battle_matches SET extra_question_user=NULL,turn_user=? WHERE match_id=?", (i.user.id,match[0]))
+    else:
+        c.execute("UPDATE battle_matches SET turn_user=? WHERE match_id=?", (i.user.id,match[0]))
+    c.commit(); c.close()
+    if forced_unknown:
+        msg = "🛡️ ガードカードの効果で、今回の回答は **わからない** になりました。"
+    else:
+        msg = f"📨 **{answer if answer != 'UNKNOWN' else 'わからない'}** と回答しました。"
+    await i.response.send_message(msg, ephemeral=True)
+    try:
+        await (await bot.fetch_user(match[12])).send(
+            f"📨 Battle `{match[0]}`\n質問への回答：**{answer if answer != 'UNKNOWN' else 'わからない'}**\n"
+            + ("🔥 追加質問権があります。そのまま `/battle質問` が使えます。" if extra else "⏳ 次はあなたのターンです。"))
+    except Exception:
+        pass
+
+@bot.tree.command(name='battle推理', description='相手のお題を推理する')
+@app_commands.describe(答え='推理したお題')
+async def battle_guess(i, 答え: str):
+    match = battle_get_active(i.user.id)
+    if not match:
+        await i.response.send_message("⚔️ 現在参加中のBattleはありません。", ephemeral=True); return
+    if len(答え.strip()) > 50 or not 答え.strip():
+        await i.response.send_message("❌ 推理は1～50文字です。", ephemeral=True); return
+    target = battle_topic_for(match,i.user.id)
+    if 答え.strip() != target:
+        await i.response.send_message("❌ **不正解！**\n質問を続けて、もう一度推理できます。", ephemeral=True); return
+
+    loser = battle_other(match,i.user.id)
+    delta = battle_change_rating(i.user.id,loser)
+    item_type,item_name = give_battle_item(i.user.id)
+    c = db(); c.execute("UPDATE battle_matches SET status='finished',winner=? WHERE match_id=?", (i.user.id,match[0])); c.commit(); c.close()
+    await i.response.send_message(
+        f"🎉 **正解！あなたの勝利です！**\n"
+        f"🧠 お題：**{target}**（{BATTLE_TOPIC_CATEGORY[target]}）\n"
+        f"🏆 **+{delta} Rating** / +100 Battle Point\n"
+        f"🎁 **{item_type}：{item_name}** を獲得！", ephemeral=True)
+    try:
+        await (await bot.fetch_user(loser)).send(
+            f"💥 Battle `{match[0]}` が終了しました。\n"
+            f"相手が正解しました。お題は **{target}** でした。")
+    except Exception:
+        pass
+
+@bot.tree.command(name='battleアイテム', description='Battleアイテムの所持数を見る')
+async def battle_items(i):
+    ensure_battle_profile(i.user.id)
+    c=db(); rows=c.execute("SELECT item_name,item_type,quantity FROM battle_items WHERE user_id=? AND quantity>0 ORDER BY item_type,item_name",(i.user.id,)).fetchall(); c.close()
+    if not rows:
+        await i.response.send_message("🎒 Battleアイテムはまだありません。", ephemeral=True); return
+    lines=["🎒 **Battleアイテム**"]
+    for name,typ,qty in rows:
+        lines.append(f"{'🔴' if typ=='攻撃' else '🔵'} **{name}** ×{qty}")
+    await i.response.send_message("\n".join(lines)+"\n\n使う：`/battleアイテム使用`", ephemeral=True)
+
+@bot.tree.command(name='battleアイテム使用', description='Battle中にアイテムを使う')
+@app_commands.describe(アイテム='使用するBattleアイテム')
+@app_commands.choices(アイテム=BATTLE_ITEM_CHOICES)
+async def battle_item_use(i, アイテム: app_commands.Choice[str]):
+    match=battle_get_active(i.user.id)
+    if not match:
+        await i.response.send_message("⚔️ Battle中のみアイテムを使えます。", ephemeral=True); return
+    name=アイテム.value
+    if not consume_battle_item(i.user.id,name):
+        await i.response.send_message("🎒 そのアイテムを持っていません。", ephemeral=True); return
+    other=battle_other(match,i.user.id)
+    c=db()
+    success=True; text=""
+    if name == "追加質問カード":
+        if match[5] != i.user.id:
+            success=False; text="⏳ 自分の質問ターンに使ってください。"
+        else:
+            c.execute("UPDATE battle_matches SET extra_question_user=? WHERE match_id=?",(i.user.id,match[0]))
+            text="🔥 **追加質問カード**を使いました。次の質問への回答後、もう一度質問できます。"
+    elif name == "ヒントカード":
+        if match[5] != i.user.id:
+            success=False; text="⏳ 自分の質問ターンに使ってください。"
+        elif match[15] == other:
+            success=False; text="🛡️ 相手の情報隠蔽カードでヒントが防がれています。"
+            c.execute("UPDATE battle_matches SET hidden_hint_user=NULL WHERE match_id=?",(match[0],))
+        else:
+            target=battle_topic_for(match,i.user.id)
+            category=BATTLE_TOPIC_CATEGORY[target]
+            text=f"💡 **ヒントカード**：相手のお題のカテゴリは **{category}** です。"
+    elif name == "回答強制カード":
+        if match[5] != i.user.id:
+            success=False; text="⏳ 自分の質問ターンに使ってください。"
+        else:
+            c.execute("UPDATE battle_matches SET force_binary_user=? WHERE match_id=?",(other,match[0]))
+            text="🎯 **回答強制カード**を使いました。相手の今回の回答は **YES / NO のみ** です。"
+    elif name == "ガードカード":
+        if match[5] == i.user.id or not match[11]:
+            success=False; text="⏳ 相手から質問を受けている回答ターンに使ってください。"
+        else:
+            c.execute("UPDATE battle_matches SET forced_unknown_user=? WHERE match_id=?",(i.user.id,match[0]))
+            text="🛡️ **ガードカード**を使いました。今回の回答は『わからない』になります。"
+    elif name == "質問変更カード":
+        if match[5] == i.user.id or not match[11]:
+            success=False; text="⏳ 相手から質問を受けている回答ターンに使ってください。"
+        else:
+            text="🔄 **質問変更カード**を使いました。相手の質問は無効になり、もう一度質問し直します。"
+            c.execute("UPDATE battle_matches SET turn_user=?,last_question=NULL,last_question_from=NULL,pending_change_user=NULL WHERE match_id=?",(other,match[0]))
+    elif name == "情報隠蔽カード":
+        c.execute("UPDATE battle_matches SET hidden_hint_user=? WHERE match_id=?",(i.user.id,match[0]))
+        text="🕶️ **情報隠蔽カード**を使いました。相手がヒントカードを使ってもカテゴリが公開されません。"
+    if not success:
+        # 失敗時はアイテムを返す。
+        c.execute("INSERT INTO battle_items(user_id,item_name,item_type,quantity) VALUES(?,?,?,1) ON CONFLICT(user_id,item_name) DO UPDATE SET quantity=quantity+1",(i.user.id,name,next(t for t,n in BATTLE_ITEM_POOL if n==name)))
+    c.commit(); c.close()
+    await i.response.send_message(text,ephemeral=True)
+    if success:
+        try:
+            await (await bot.fetch_user(other)).send(f"⚔️ Battle `{match[0]}`\n{text}")
+        except Exception:
+            pass
+
+@bot.tree.command(name='battleステータス', description='Battleの戦績を見る')
+async def battle_status(i):
+    ensure_battle_profile(i.user.id)
+    c=db(); r=c.execute("SELECT rating,wins,losses,streak,best_streak,battle_points,total_games FROM battle_profiles WHERE user_id=?",(i.user.id,)).fetchone(); c.close()
+    rating,wins,losses,streak,best,bp,games=r; rate=wins/games*100 if games else 0
+    await i.response.send_message(f"⚔️ **Battle Status**\nランク：**{battle_rank(rating)}**\nRating：**{rating}**\n勝利：**{wins}**　敗北：**{losses}**\n勝率：**{rate:.1f}%**\n連勝：**{streak}**（最高 **{best}**）\nBattle Point：**{bp}**",ephemeral=True)
+
+@bot.tree.command(name='battleランキング', description='全サーバー共通Battleランキング')
+async def battle_ranking(i):
+    c=db(); rows=c.execute("SELECT user_id,rating,wins,losses FROM battle_profiles ORDER BY rating DESC,wins DESC LIMIT 10").fetchall(); c.close()
+    if not rows:
+        await i.response.send_message("🏆 まだBattleランキングにデータがありません。",ephemeral=True); return
+    lines=["🏆 **Battle Ranking（全サーバー共通）**"]
+    for n,(uid,rating,wins,losses) in enumerate(rows,1):
+        lines.append(f"{n}. <@{uid}> — **{battle_rank(rating)} / {rating}** | {wins}勝 {losses}敗")
+    await i.response.send_message("\n".join(lines),ephemeral=True)
+
+async def create_match(player1, player2, ranked=False):
+    if battle_get_active(player1) or battle_get_active(player2): return None
+    topic1=random.choice(BATTLE_TOPICS); topic2=random.choice(BATTLE_TOPICS)
+    while topic2==topic1: topic2=random.choice(BATTLE_TOPICS)
+    mid=f"B{random.randrange(0x1000000):06X}"
+    c=db(); c.execute("""INSERT INTO battle_matches
+        (match_id,player1,player2,player1_topic,player2_topic,turn_user,status,created_at)
+        VALUES(?,?,?,?,?,?,?,?)""",(mid,player1,player2,topic1,topic2,player1,"active",datetime.now(timezone.utc).isoformat())); c.commit(); c.close()
+    return mid
+
+@bot.tree.command(name='battleランダム', description='全サーバー共通ランダムマッチ')
+async def battle_random(i):
+    ensure_battle_profile(i.user.id)
+    if battle_get_active(i.user.id):
+        await i.response.send_message("⚔️ すでにBattle中です。",ephemeral=True); return
+    c=db(); existing=c.execute("SELECT user_id FROM battle_queue WHERE user_id=?",(i.user.id,)).fetchone()
+    if existing:
+        c.close(); await i.response.send_message("🔎 すでに待機中です。",ephemeral=True); return
+    opponent=c.execute("SELECT user_id FROM battle_queue WHERE user_id<>? AND ranked=0 ORDER BY queued_at LIMIT 1",(i.user.id,)).fetchone()
+    if opponent:
+        oid=opponent[0]; c.execute("DELETE FROM battle_queue WHERE user_id=?",(oid,)); c.commit(); c.close()
+        mid=await create_match(i.user.id,oid,False)
+        await i.response.send_message(f"⚔️ **マッチング成功！**\n相手：<@{oid}>\n対戦ID：`{mid}`\n🌐 全サーバー共通です。",ephemeral=True)
+        try: await (await bot.fetch_user(oid)).send(f"⚔️ **Battleマッチング成功！**\n相手：<@{i.user.id}>\n対戦ID：`{mid}`\nあなたは後攻です。")
+        except Exception: pass
+    else:
+        c.execute("INSERT INTO battle_queue(user_id,server_id,queued_at,ranked) VALUES(?,?,?,0)",(i.user.id,i.guild.id if i.guild else 0,datetime.now(timezone.utc).isoformat())); c.commit(); c.close()
+        await i.response.send_message("🔎 **ランダムマッチ待機中！**\n🌐 全サーバー共通の待機列です。",ephemeral=True)
+
+@bot.tree.command(name='battleランクマッチ', description='全サーバー共通ランクマッチ')
+async def battle_ranked(i):
+    ensure_battle_profile(i.user.id)
+    if battle_get_active(i.user.id):
+        await i.response.send_message("⚔️ すでにBattle中です。",ephemeral=True); return
+    c=db(); me=c.execute("SELECT rating FROM battle_profiles WHERE user_id=?",(i.user.id,)).fetchone(); existing=c.execute("SELECT user_id FROM battle_queue WHERE user_id=?",(i.user.id,)).fetchone()
+    if existing:
+        c.close(); await i.response.send_message("🔎 すでにマッチング待機中です。",ephemeral=True); return
+    rating=me[0] if me else 1000
+    opponent=c.execute("SELECT user_id,rating FROM battle_queue q JOIN battle_profiles p ON p.user_id=q.user_id WHERE q.user_id<>? AND q.ranked=1 AND ABS(p.rating-?)<=250 ORDER BY ABS(p.rating-?) LIMIT 1",(i.user.id,rating,rating)).fetchone()
+    if opponent:
+        oid=opponent[0]; c.execute("DELETE FROM battle_queue WHERE user_id=?",(oid,)); c.commit(); c.close(); mid=await create_match(i.user.id,oid,True)
+        await i.response.send_message(f"🏆 **ランクマッチ成立！**\n相手：<@{oid}>\n対戦ID：`{mid}`\n🌐 全サーバー共通です。",ephemeral=True)
+        try: await (await bot.fetch_user(oid)).send(f"🏆 **ランクマッチ成立！**\n相手：<@{i.user.id}>\n対戦ID：`{mid}`")
+        except Exception: pass
+    else:
+        c.execute("INSERT INTO battle_queue(user_id,server_id,queued_at,ranked) VALUES(?,?,?,1)",(i.user.id,i.guild.id if i.guild else 0,datetime.now(timezone.utc).isoformat())); c.commit(); c.close()
+        await i.response.send_message(f"🏆 **ランクマッチ待機中！**\n現在：**{battle_rank(rating)} / {rating}**\n±250 Rating以内の相手を探します。",ephemeral=True)
 
 @tasks.loop(hours=6)
 async def market_tick():
