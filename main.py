@@ -52,7 +52,7 @@ async def help_cmd(i):
     e.add_field(name='🎥 くぃチューバー',value='/yt_start /yt_status /yt_post /yt_train',inline=False)
     e.add_field(name='📈 株・会社',value='/会社設立 /会社情報 /会社一覧 /市場 /株購入 /株売却 /ポートフォリオ /資産 /会社削除',inline=False)
     e.add_field(name='🔄 リセット',value='/チャンネル削除（自分のチャンネルを削除）',inline=False)
-    e.add_field(name='⚔️ Battle',value='/battle /battle質問 /battle回答 /battle推理 /battleアイテム /battleステータス /battleランキング /battleランダム /battleランクマッチ',inline=False)
+    e.add_field(name='⚔️ Battle',value='/battle /battle質問 /battle回答 /battle推理 /battle降参 /battleアイテム /battleステータス /battleランキング /battleランダム /battleランクマッチ /battleキャンセル',inline=False)
     await i.response.send_message(embed=e, ephemeral=True)
 
 @bot.tree.command(name='money',description='ゲーム内資金を確認')
@@ -575,6 +575,30 @@ async def battle_guess(i, 答え: str):
     except Exception:
         pass
 
+@bot.tree.command(name='battle降参', description='現在のBattleを降参して終了する')
+async def battle_surrender(i):
+    match = battle_get_active(i.user.id)
+    if not match:
+        await i.response.send_message("⚔️ 現在参加中のBattleはありません。", ephemeral=True); return
+
+    winner = battle_other(match, i.user.id)
+    delta = battle_change_rating(winner, i.user.id)
+    c = db()
+    c.execute("UPDATE battle_matches SET status='finished',winner=? WHERE match_id=?", (winner, match[0]))
+    c.commit(); c.close()
+
+    await i.response.send_message(
+        "🏳️ **降参しました。**\n"
+        f"🏆 対戦相手の勝利です。相手に **+{delta} Rating / +100 Battle Point** が入ります。",
+        ephemeral=True)
+    try:
+        await (await bot.fetch_user(winner)).send(
+            f"🎉 **Battle `{match[0]}` 勝利！**\n"
+            f"相手が降参しました。\n"
+            f"🏆 **+{delta} Rating / +100 Battle Point**")
+    except Exception:
+        pass
+
 @bot.tree.command(name='battleアイテム', description='Battleアイテムの所持数を見る')
 async def battle_items(i):
     ensure_battle_profile(i.user.id)
@@ -692,6 +716,19 @@ async def battle_random(i):
     else:
         c.execute("INSERT INTO battle_queue(user_id,server_id,queued_at,ranked) VALUES(?,?,?,0)",(i.user.id,i.guild.id if i.guild else 0,datetime.now(timezone.utc).isoformat())); c.commit(); c.close()
         await i.response.send_message("🔎 **ランダムマッチ待機中！**\n🌐 全サーバー共通の待機列です。",ephemeral=True)
+
+@bot.tree.command(name='battleキャンセル', description='ランダムマッチ・ランクマッチの待機をキャンセル')
+async def battle_cancel(i):
+    c = db()
+    r = c.execute("SELECT ranked FROM battle_queue WHERE user_id=?", (i.user.id,)).fetchone()
+    if not r:
+        c.close()
+        await i.response.send_message("🔎 現在、マッチング待機中ではありません。", ephemeral=True)
+        return
+    mode = "ランクマッチ" if r[0] else "ランダムマッチ"
+    c.execute("DELETE FROM battle_queue WHERE user_id=?", (i.user.id,))
+    c.commit(); c.close()
+    await i.response.send_message(f"🛑 **{mode}をキャンセルしました。**\n待機列から退出しました。", ephemeral=True)
 
 @bot.tree.command(name='battleランクマッチ', description='全サーバー共通ランクマッチ')
 async def battle_ranked(i):
