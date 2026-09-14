@@ -383,6 +383,13 @@ def init_battle_tables():
                      answerer=COALESCE(answerer,player2),
                      answerer_topic=COALESCE(answerer_topic,player2_topic)
                  WHERE questioner IS NULL OR answerer IS NULL OR answerer_topic IS NULL""")
+    c.execute("""CREATE TABLE IF NOT EXISTS battle_invites(
+        invite_id TEXT PRIMARY KEY,
+        inviter INTEGER NOT NULL,
+        invitee INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL
+    )""")
     c.execute("""CREATE TABLE IF NOT EXISTS battle_queue(
         user_id INTEGER PRIMARY KEY,
         server_id INTEGER NOT NULL,
@@ -457,7 +464,7 @@ def battle_topic_for(match, user_id):
 
 init_battle_tables()
 
-@bot.tree.command(name='battle', description='友達と推理バトルを開始')
+@bot.tree.command(name='battle', description='友達に推理バトルを招待する')
 @app_commands.describe(相手='対戦する相手')
 async def battle_start(i, 相手: discord.Member):
     ensure_battle_profile(i.user.id); ensure_battle_profile(相手.id)
@@ -468,30 +475,102 @@ async def battle_start(i, 相手: discord.Member):
     if battle_get_active(i.user.id) or battle_get_active(相手.id):
         await i.response.send_message("⚔️ どちらかがすでにBattle中です。", ephemeral=True); return
 
-    match_id = f"B{random.randrange(0x1000000):06X}"
-    questioner, answerer = random.sample([i.user.id, 相手.id], 2)
-    answerer_topic = random.choice(BATTLE_TOPICS)
     c = db()
-    c.execute("""INSERT INTO battle_matches
-        (match_id,player1,player2,player1_topic,player2_topic,questioner,answerer,answerer_topic,turn_user,status,created_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-        (match_id,i.user.id,相手.id,None,None,questioner,answerer,answerer_topic,questioner,"active",datetime.now(timezone.utc).isoformat()))
+    # 同じ相手への重複招待を防ぐ。
+    existing = c.execute("SELECT 1 FROM battle_invites WHERE inviter=? AND invitee=? AND status='pending'", (i.user.id, 相手.id)).fetchone()
+    if existing:
+        c.close()
+        await i.response.send_message("📨 すでにその相手へBattle招待を送っています。", ephemeral=True); return
+    invite_id = f"I{random.randrange(0x1000000):06X}"
+    c.execute("INSERT INTO battle_invites(invite_id,inviter,invitee,status,created_at) VALUES(?,?,?,?,?)",
+              (invite_id,i.user.id,相手.id,'pending',datetime.now(timezone.utc).isoformat()))
     c.commit(); c.close()
 
-    q_user = await bot.fetch_user(questioner)
-    a_user = await bot.fetch_user(answerer)
-    await i.response.send_message(
-        f"⚔️ **Battle開始！**\n対戦相手：**{相手.display_name}**\n対戦ID：`{match_id}`\n\n"
-        + ("❓ **あなたは質問者です！**\n相手のお題を20問以内に当ててください。\n`/battle質問` で質問、`/battle推理` で推理できます。"
-           if questioner == i.user.id else "🧠 **あなたは回答者です！**\n🔐 お題：**" + answerer_topic + "**\n相手から質問されたら `/battle回答` で YES / NO / わからない を選んでください。\n🤔『わからない』は3回までです。"),
-        ephemeral=True)
+    view = BattleInviteView(invite_id, i.user.id, 相手.id)
     try:
-        if questioner == i.user.id:
-            await a_user.send(f"⚔️ **Battle開始！**\n対戦相手：**{q_user.display_name}**\n対戦ID：`{match_id}`\n\n🧠 **あなたは回答者です！**\n🔐 お題：**{answerer_topic}**\n相手から質問されたら `/battle回答` で YES / NO / わからない を選んでください。\n🤔『わからない』は3回までです。")
-        else:
-            await q_user.send(f"⚔️ **Battle開始！**\n対戦相手：**{a_user.display_name}**\n対戦ID：`{match_id}`\n\n❓ **あなたは質問者です！**\n相手のお題を20問以内に当ててください。\n`/battle質問` で質問、`/battle推理` で推理できます。")
+        await 相手.send(
+            f"⚔️ **Battleへの招待が届きました！**\n"
+            f"招待者：**{i.user.display_name}**\n\n"
+            f"参加するなら **承認**、対戦したくないなら **拒否** を押してください。\n"
+            f"⏱️ この招待は10分で期限切れになります。",
+            view=view
+        )
+        await i.response.send_message(
+            f"📨 **Battle招待を送りました！**\n相手：**{相手.display_name}**\n"
+            f"相手が承認するとBattleが開始されます。",
+            ephemeral=True)
     except Exception:
-        pass
+        c = db(); c.execute("UPDATE battle_invites SET status='cancelled' WHERE invite_id=?", (invite_id,)); c.commit(); c.close()
+        await i.response.send_message("❌ 相手にDMを送れませんでした。相手のDM設定を確認してください。", ephemeral=True)
+
+
+class BattleInviteView(discord.ui.View):
+    def __init__(self, invite_id, inviter_id, invitee_id):
+        super().__init__(timeout=600)
+        self.invite_id = invite_id
+        self.inviter_id = inviter_id
+        self.invitee_id = invitee_id
+
+    async def finish_invite(self, interaction, accepted):
+        if interaction.user.id != self.invitee_id:
+            await interaction.response.send_message("❌ この招待を操作できるのは招待された本人だけです。", ephemeral=True)
+            return
+        c = db()
+        row = c.execute("SELECT status FROM battle_invites WHERE invite_id=?", (self.invite_id,)).fetchone()
+        if not row or row[0] != 'pending':
+            c.close()
+            await interaction.response.send_message("⚠️ この招待はすでに処理済み、または期限切れです。", ephemeral=True)
+            return
+        if not accepted:
+            c.execute("UPDATE battle_invites SET status='rejected' WHERE invite_id=?", (self.invite_id,)); c.commit(); c.close()
+            for child in self.children: child.disabled = True
+            await interaction.response.edit_message(content="🚫 **Battle招待を拒否しました。**", view=self)
+            try:
+                await bot.get_user(self.inviter_id).send(f"🚫 **{interaction.user.display_name}** がBattle招待を拒否しました。")
+            except Exception: pass
+            return
+
+        if battle_get_active(self.inviter_id) or battle_get_active(self.invitee_id):
+            c.execute("UPDATE battle_invites SET status='cancelled' WHERE invite_id=?", (self.invite_id,)); c.commit(); c.close()
+            for child in self.children: child.disabled = True
+            await interaction.response.edit_message(content="⚠️ どちらかがすでにBattle中のため、開始できませんでした。", view=self)
+            return
+
+        match_id = f"B{random.randrange(0x1000000):06X}"
+        questioner, answerer = random.sample([self.inviter_id, self.invitee_id], 2)
+        answerer_topic = random.choice(BATTLE_TOPICS)
+        c.execute("""INSERT INTO battle_matches
+            (match_id,player1,player2,player1_topic,player2_topic,questioner,answerer,answerer_topic,turn_user,status,created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (match_id,self.inviter_id,self.invitee_id,None,None,questioner,answerer,answerer_topic,questioner,'active',datetime.now(timezone.utc).isoformat()))
+        c.execute("UPDATE battle_invites SET status='accepted' WHERE invite_id=?", (self.invite_id,))
+        c.commit(); c.close()
+
+        for child in self.children: child.disabled = True
+        await interaction.response.edit_message(content="✅ **Battle招待を承認しました！Battle開始！**", view=self)
+        q_user = await bot.fetch_user(questioner); a_user = await bot.fetch_user(answerer)
+        try:
+            await q_user.send(f"⚔️ **Battle開始！**\n対戦相手：**{a_user.display_name}**\n対戦ID：`{match_id}`\n\n❓ **あなたは質問者です！**\n相手のお題を20問以内に当ててください。\n`/battle質問` で質問、`/battle推理` で推理できます。")
+            await a_user.send(f"⚔️ **Battle開始！**\n対戦相手：**{q_user.display_name}**\n対戦ID：`{match_id}`\n\n🧠 **あなたは回答者です！**\n🔐 お題：**{answerer_topic}**\n質問されたら `/battle回答` で YES / NO / わからない と答えてください。\n🤔『わからない』は3回までです。")
+        except Exception: pass
+
+    async def on_timeout(self):
+        c = db(); c.execute("UPDATE battle_invites SET status='expired' WHERE invite_id=? AND status='pending'", (self.invite_id,)); c.commit(); c.close()
+        for child in self.children: child.disabled = True
+        try:
+            if self.message:
+                await self.message.edit(content="⌛ **Battle招待の期限が切れました。**", view=self)
+        except Exception:
+            pass
+
+    @discord.ui.button(label='承認', style=discord.ButtonStyle.success, emoji='✅')
+    async def accept(self, interaction, button):
+        await self.finish_invite(interaction, True)
+
+    @discord.ui.button(label='拒否', style=discord.ButtonStyle.danger, emoji='🚫')
+    async def reject(self, interaction, button):
+        await self.finish_invite(interaction, False)
+
 
 @bot.tree.command(name='battle質問', description='相手のお題を推理する質問を送る')
 @app_commands.describe(質問='YES/NOで答えられる質問がおすすめです')
