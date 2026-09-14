@@ -1,3 +1,6 @@
+# kwiigonaBOT v2
+# 個人情報・個人進行に関わるコマンドは原則エフェメラル表示。
+# 共有情報（ランキング、会社情報、会社一覧、市場）は通常表示。
 import os, random, sqlite3, math
 from datetime import datetime, date, timedelta, timezone
 import discord
@@ -48,10 +51,10 @@ async def help_cmd(i):
     e.add_field(name='🎁 GomaLog',value='/gomalog /gomalog_rank /gomalog_collection',inline=False)
     e.add_field(name='🎥 くぃチューバー',value='/yt_start /yt_status /yt_post /yt_train',inline=False)
     e.add_field(name='📈 株・会社',value='/会社設立 /会社情報 /会社一覧 /市場 /株購入 /株売却 /ポートフォリオ /資産',inline=False)
-    await i.response.send_message(embed=e)
+    await i.response.send_message(embed=e, ephemeral=True)
 
 @bot.tree.command(name='money',description='ゲーム内資金を確認')
-async def money_cmd(i): ensure_user(i.user); await i.response.send_message(f'💰 現金：**{yen(money(i.user.id))}**')
+async def money_cmd(i): ensure_user(i.user); await i.response.send_message(f'💰 現金：**{yen(money(i.user.id))}**', ephemeral=True)
 
 @bot.tree.command(name='gomalog',description='今日のログイン報酬を受け取る')
 async def gomalog(i):
@@ -73,12 +76,12 @@ async def gl_collection(i):
     c=db(); rows=c.execute('SELECT item,count FROM collections WHERE user_id=? ORDER BY count DESC',(i.user.id,)).fetchall(); c.close(); await i.response.send_message('📚 **コレクション**\n'+('\n'.join(f'• {a} × {b}' for a,b in rows) if rows else 'まだありません。'))
 
 @bot.tree.command(name='yt_start',description='くぃチューバーを開始')
-async def yt_start(i): ensure_user(i.user); yt(i.user.id); await i.response.send_message('🎥 くぃチューバー開始！登録者0人からスタートです。')
+async def yt_start(i): ensure_user(i.user); yt(i.user.id); await i.response.send_message('🎥 くぃチューバー開始！登録者0人からスタートです。', ephemeral=True)
 @bot.tree.command(name='yt_status',description='チャンネル情報')
 async def yt_status(i):
-    r=yt(i.user.id); e=discord.Embed(title=f'🎥 {i.user.display_name} のチャンネル'); labels=['登録者','総再生','高評価','コメント','動画','Shorts','収益','体力']; vals=[f'{r[0]:,}人',f'{r[1]:,}回',f'{r[2]:,}',f'{r[3]:,}',f'{r[4]:,}',f'{r[5]:,}',yen(r[6]),f'{r[7]}/100']
+    ensure_user(i.user); r=yt(i.user.id); e=discord.Embed(title=f'🎥 {i.user.display_name} のチャンネル'); labels=['登録者','総再生','高評価','コメント','動画','Shorts','収益','体力']; vals=[f'{r[0]:,}人',f'{r[1]:,}回',f'{r[2]:,}',f'{r[3]:,}',f'{r[4]:,}',f'{r[5]:,}',yen(r[6]),f'{r[7]}/100']
     for a,b in zip(labels,vals): e.add_field(name=a,value=b)
-    await i.response.send_message(embed=e)
+    await i.response.send_message(embed=e, ephemeral=True)
 @bot.tree.command(name='yt_post',description='動画を投稿')
 @app_commands.describe(topic='動画ジャンル',shorts='Shortsかどうか')
 @app_commands.choices(topic=[app_commands.Choice(name=x,value=x) for x in TOPICS])
@@ -86,9 +89,9 @@ async def yt_post(i,topic:app_commands.Choice[str],shorts:bool=False):
     ensure_user(i.user); r=yt(i.user.id); cost=10 if shorts else 20
     if r[7]<cost: await i.response.send_message('⚡ 体力不足です。/yt_train で回復してください。',ephemeral=True); return
     interest,competition=TOPICS[topic.value]; base=random.randint(50,300) if shorts else random.randint(80,500); views=max(1,int(base*interest*random.uniform(.75,1.35)/competition*(1+math.log10(r[0]+10)*.25))); likes=int(views*random.uniform(.035,.09)); comments=int(views*random.uniform(.002,.012)); subs=max(0,int(views*random.uniform(.005,.02))); rev=int(views*(.12 if shorts else .35)); c=db(); c.execute('UPDATE youtubers SET subscribers=subscribers+?,views=views+?,likes=likes+?,comments=comments+?,videos=videos+1,shorts=shorts+?,revenue=revenue+?,energy=energy-? WHERE user_id=?',(subs,views,likes,comments,int(shorts),rev,cost,i.user.id)); c.commit(); c.close(); change_money(i.user.id,rev)
-    await i.response.send_message(f'🎬 **投稿完了**\nジャンル：{topic.value}\n再生：**{views:,}回**\n高評価：**{likes:,}**\nコメント：**{comments:,}**\n登録者：**+{subs:,}人**\n収益：**{yen(rev)}**')
+    await i.response.send_message(f'🎬 **投稿完了**\nジャンル：{topic.value}\n再生：**{views:,}回**\n高評価：**{likes:,}**\nコメント：**{comments:,}**\n登録者：**+{subs:,}人**\n収益：**{yen(rev)}**', ephemeral=True)
 @bot.tree.command(name='yt_train',description='制作トレーニング')
-async def yt_train(i): yt(i.user.id); c=db(); c.execute('UPDATE youtubers SET energy=MIN(100,energy+30) WHERE user_id=?',(i.user.id,)); c.commit(); c.close(); await i.response.send_message('💪 体力が30回復しました。')
+async def yt_train(i): yt(i.user.id); c=db(); c.execute('UPDATE youtubers SET energy=MIN(100,energy+30) WHERE user_id=?',(i.user.id,)); c.commit(); c.close(); await i.response.send_message('💪 体力が30回復しました。', ephemeral=True)
 
 @bot.tree.command(name='会社設立',description='会社を設立')
 @app_commands.describe(会社名='会社名',業種='業種')
@@ -100,7 +103,7 @@ async def create_company(i,会社名:str,業種:app_commands.Choice[str]):
     if c.execute('SELECT id FROM companies WHERE owner_id=?',(i.user.id,)).fetchone(): c.close(); await i.response.send_message('1ユーザーにつき会社は1社までです。'); return
     try: c.execute('INSERT INTO companies(owner_id,name,sector,created_at) VALUES(?,?,?,?)',(i.user.id,会社名,業種.value,datetime.now(timezone.utc).isoformat())); c.commit()
     except sqlite3.IntegrityError: c.close(); await i.response.send_message('その会社名はすでに使われています。'); return
-    c.close(); await i.response.send_message(f'🏢 **{会社名}** を設立しました！\n業種：{業種.value}\n資本金：{yen(500000)}\n発行株式：10,000株\n初期株価：{yen(100)}')
+    c.close(); await i.response.send_message(f'🏢 **{会社名}** を設立しました！\n業種：{業種.value}\n資本金：{yen(500000)}\n発行株式：10,000株\n初期株価：{yen(100)}', ephemeral=True)
 
 @bot.tree.command(name='会社情報',description='会社情報を見る')
 @app_commands.describe(会社名='会社名')
@@ -127,7 +130,7 @@ async def buy(i,会社名:str,株数:int):
     if old:
         ns=old[0]+株数; avg=(old[0]*old[1]+cost)/ns; c.execute('UPDATE holdings SET shares=?,avg_price=? WHERE user_id=? AND company_id=?',(ns,avg,i.user.id,r[0]))
     else:c.execute('INSERT INTO holdings(user_id,company_id,shares,avg_price) VALUES(?,?,?,?)',(i.user.id,r[0],株数,r[10]))
-    c.commit(); c.close(); change_money(i.user.id,-cost); await i.response.send_message(f'🛒 **{r[2]}** を {株数:,}株購入。購入額：**{yen(cost)}**')
+    c.commit(); c.close(); change_money(i.user.id,-cost); await i.response.send_message(f'🛒 **{r[2]}** を {株数:,}株購入。購入額：**{yen(cost)}**', ephemeral=True)
 
 @bot.tree.command(name='株売却',description='保有株を売却')
 @app_commands.describe(会社名='会社名',株数='売却株数')
@@ -139,13 +142,13 @@ async def sell(i,会社名:str,株数:int):
     remain=h[0]-株数
     if remain:c.execute('UPDATE holdings SET shares=? WHERE user_id=? AND company_id=?',(remain,i.user.id,r[0]))
     else:c.execute('DELETE FROM holdings WHERE user_id=? AND company_id=?',(i.user.id,r[0]))
-    c.commit(); c.close(); proceeds=r[10]*株数; change_money(i.user.id,proceeds); await i.response.send_message(f'💵 **{r[2]}** を {株数:,}株売却。売却額：**{yen(proceeds)}**')
+    c.commit(); c.close(); proceeds=r[10]*株数; change_money(i.user.id,proceeds); await i.response.send_message(f'💵 **{r[2]}** を {株数:,}株売却。売却額：**{yen(proceeds)}**', ephemeral=True)
 
 @bot.tree.command(name='ポートフォリオ',description='保有株を確認')
 async def portfolio(i):
     ensure_user(i.user); c=db(); rows=c.execute('SELECT c.name,h.shares,c.share_price,h.avg_price FROM holdings h JOIN companies c ON c.id=h.company_id WHERE h.user_id=? AND h.shares>0',(i.user.id,)).fetchall(); c.close()
-    if not rows: await i.response.send_message('保有株はありません。'); return
-    total=sum(s*p for _,s,p,_ in rows); lines=[f'**{n}** — {s:,}株 / {yen(s*p)} / 損益 {yen((p-a)*s)}' for n,s,p,a in rows]; await i.response.send_message('📊 **ポートフォリオ**\n'+'\n'.join(lines)+f'\n\n株式評価額：**{yen(total)}**\n現金：**{yen(money(i.user.id))}**')
+    if not rows: await i.response.send_message('保有株はありません。', ephemeral=True); return
+    total=sum(s*p for _,s,p,_ in rows); lines=[f'**{n}** — {s:,}株 / {yen(s*p)} / 損益 {yen((p-a)*s)}' for n,s,p,a in rows]; await i.response.send_message('📊 **ポートフォリオ**\n'+'\n'.join(lines)+f'\n\n株式評価額：**{yen(total)}**\n現金：**{yen(money(i.user.id))}**', ephemeral=True)
 
 @bot.tree.command(name='市場',description='市場情報を見る')
 async def market(i):
@@ -155,7 +158,7 @@ async def market(i):
 
 @bot.tree.command(name='資産',description='総資産を確認')
 async def assets(i):
-    ensure_user(i.user); c=db(); r=c.execute('SELECT COALESCE(SUM(h.shares*c.share_price),0) FROM holdings h JOIN companies c ON c.id=h.company_id WHERE h.user_id=?',(i.user.id,)).fetchone(); c.close(); cash=money(i.user.id); stocks=r[0] or 0; await i.response.send_message(f'💰 **総資産**\n現金：{yen(cash)}\n株式：{yen(stocks)}\n**合計：{yen(cash+stocks)}**')
+    ensure_user(i.user); c=db(); r=c.execute('SELECT COALESCE(SUM(h.shares*c.share_price),0) FROM holdings h JOIN companies c ON c.id=h.company_id WHERE h.user_id=?',(i.user.id,)).fetchone(); c.close(); cash=money(i.user.id); stocks=r[0] or 0; await i.response.send_message(f'💰 **総資産**\n現金：{yen(cash)}\n株式：{yen(stocks)}\n**合計：{yen(cash+stocks)}**', ephemeral=True)
 
 @tasks.loop(hours=6)
 async def market_tick():
