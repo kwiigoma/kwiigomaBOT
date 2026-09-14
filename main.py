@@ -64,16 +64,16 @@ async def gomalog(i):
     grade,item,reward,rare=weighted_reward()
     x.execute('INSERT INTO gomalog(user_id,last_date,streak,max_streak,total_claims,total_rares) VALUES(?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET last_date=excluded.last_date,streak=excluded.streak,max_streak=MAX(gomalog.max_streak,excluded.streak),total_claims=gomalog.total_claims+1,total_rares=gomalog.total_rares+excluded.total_rares',(i.user.id,today,streak,streak,1,rare))
     x.execute('INSERT INTO collections(user_id,item,count) VALUES(?,?,1) ON CONFLICT(user_id,item) DO UPDATE SET count=count+1',(i.user.id,item)); c.commit(); c.close(); change_money(i.user.id,reward)
-    await i.response.send_message(f'🎁 **GomaLog**\nランク：**{grade}**\n報酬：**{item}**\n獲得：**{yen(reward)}**\n🔥 連続：**{streak}日**')
+    await i.response.send_message(f'🎁 **GomaLog**\nランク：**{grade}**\n報酬：**{item}**\n獲得：**{yen(reward)}**\n🔥 連続：**{streak}日**', ephemeral=True)
 
 @bot.tree.command(name='gomalog_rank',description='GomaLogランキング')
 async def gl_rank(i):
     c=db(); rows=c.execute('SELECT user_id,total_claims,streak FROM gomalog ORDER BY total_claims DESC,streak DESC LIMIT 10').fetchall(); c.close()
-    await i.response.send_message('🏆 **GomaLogランキング**\n'+('\n'.join(f'**{n}. <@{r[0]}>** — {r[1]}回 / 連続{r[2]}日' for n,r in enumerate(rows,1)) if rows else 'まだありません。'))
+    await i.response.send_message('🏆 **GomaLogランキング**\n'+('\n'.join(f'**{n}. <@{r[0]}>** — {r[1]}回 / 連続{r[2]}日' for n,r in enumerate(rows,1)) if rows else 'まだありません。'), ephemeral=True)
 
 @bot.tree.command(name='gomalog_collection',description='GomaLogコレクション')
 async def gl_collection(i):
-    c=db(); rows=c.execute('SELECT item,count FROM collections WHERE user_id=? ORDER BY count DESC',(i.user.id,)).fetchall(); c.close(); await i.response.send_message('📚 **コレクション**\n'+('\n'.join(f'• {a} × {b}' for a,b in rows) if rows else 'まだありません。'))
+    c=db(); rows=c.execute('SELECT item,count FROM collections WHERE user_id=? ORDER BY count DESC',(i.user.id,)).fetchall(); c.close(); await i.response.send_message('📚 **コレクション**\n'+('\n'.join(f'• {a} × {b}' for a,b in rows) if rows else 'まだありません。'), ephemeral=True)
 
 @bot.tree.command(name='yt_start',description='くぃチューバーを開始')
 async def yt_start(i): ensure_user(i.user); yt(i.user.id); await i.response.send_message('🎥 くぃチューバー開始！登録者0人からスタートです。', ephemeral=True)
@@ -100,32 +100,32 @@ async def create_company(i,会社名:str,業種:app_commands.Choice[str]):
     ensure_user(i.user)
     if not 2<=len(会社名)<=30: await i.response.send_message('会社名は2～30文字です。',ephemeral=True); return
     c=db();
-    if c.execute('SELECT id FROM companies WHERE owner_id=?',(i.user.id,)).fetchone(): c.close(); await i.response.send_message('1ユーザーにつき会社は1社までです。'); return
+    if c.execute('SELECT id FROM companies WHERE owner_id=?',(i.user.id,)).fetchone(): c.close(); await i.response.send_message('1ユーザーにつき会社は1社までです。', ephemeral=True); return
     try: c.execute('INSERT INTO companies(owner_id,name,sector,created_at) VALUES(?,?,?,?)',(i.user.id,会社名,業種.value,datetime.now(timezone.utc).isoformat())); c.commit()
-    except sqlite3.IntegrityError: c.close(); await i.response.send_message('その会社名はすでに使われています。'); return
+    except sqlite3.IntegrityError: c.close(); await i.response.send_message('その会社名はすでに使われています。', ephemeral=True); return
     c.close(); await i.response.send_message(f'🏢 **{会社名}** を設立しました！\n業種：{業種.value}\n資本金：{yen(500000)}\n発行株式：10,000株\n初期株価：{yen(100)}', ephemeral=True)
 
 @bot.tree.command(name='会社情報',description='会社情報を見る')
 @app_commands.describe(会社名='会社名')
 async def company_info(i,会社名:str):
     r=company(会社名)
-    if not r: await i.response.send_message('会社が見つかりません。'); return
+    if not r: await i.response.send_message('会社が見つかりません。', ephemeral=True); return
     e=discord.Embed(title=f'🏢 {r[2]}'); vals=[('業種',r[3]),('現金',yen(r[4])),('売上',yen(r[5])),('利益',yen(r[6])),('評判',f'{r[7]}/100'),('従業員',f'{r[8]}人'),('株価',yen(r[10])),('時価総額',yen(r[9]*r[10]))]
     for a,b in vals:e.add_field(name=a,value=b)
-    await i.response.send_message(embed=e)
+    await i.response.send_message(embed=e, ephemeral=True)
 
 @bot.tree.command(name='会社一覧',description='会社一覧')
 async def company_list(i):
-    c=db(); rows=c.execute('SELECT name,sector,share_price,profit FROM companies WHERE listed=1 ORDER BY share_price DESC LIMIT 15').fetchall(); c.close(); await i.response.send_message('📈 **会社一覧**\n'+('\n'.join(f'**{n}. {r[0]}** [{r[1]}] — {yen(r[2])} / 利益 {yen(r[3])}' for n,r in enumerate(rows,1)) if rows else 'まだ会社がありません。'))
+    c=db(); rows=c.execute('SELECT name,sector,share_price,profit FROM companies WHERE listed=1 ORDER BY share_price DESC LIMIT 15').fetchall(); c.close(); await i.response.send_message('📈 **会社一覧**\n'+('\n'.join(f'**{n}. {r[0]}** [{r[1]}] — {yen(r[2])} / 利益 {yen(r[3])}' for n,r in enumerate(rows,1)) if rows else 'まだ会社がありません。'), ephemeral=True)
 
 @bot.tree.command(name='株購入',description='株を購入')
 @app_commands.describe(会社名='会社名',株数='購入株数')
 async def buy(i,会社名:str,株数:int):
     ensure_user(i.user); r=company(会社名)
-    if not r or not r[11]: await i.response.send_message('購入できる上場会社がありません。'); return
+    if not r or not r[11]: await i.response.send_message('購入できる上場会社がありません。', ephemeral=True); return
     if 株数<=0: await i.response.send_message('株数は1以上です。',ephemeral=True); return
     cost=r[10]*株数
-    if money(i.user.id)<cost: await i.response.send_message(f'資金不足です。必要額：{yen(cost)}'); return
+    if money(i.user.id)<cost: await i.response.send_message(f'資金不足です。必要額：{yen(cost)}', ephemeral=True); return
     c=db(); old=c.execute('SELECT shares,avg_price FROM holdings WHERE user_id=? AND company_id=?',(i.user.id,r[0])).fetchone();
     if old:
         ns=old[0]+株数; avg=(old[0]*old[1]+cost)/ns; c.execute('UPDATE holdings SET shares=?,avg_price=? WHERE user_id=? AND company_id=?',(ns,avg,i.user.id,r[0]))
@@ -138,7 +138,7 @@ async def sell(i,会社名:str,株数:int):
     ensure_user(i.user); r=company(会社名)
     if not r or 株数<=0: await i.response.send_message('会社または株数が不正です。',ephemeral=True); return
     c=db(); h=c.execute('SELECT shares FROM holdings WHERE user_id=? AND company_id=?',(i.user.id,r[0])).fetchone()
-    if not h or h[0]<株数: c.close(); await i.response.send_message('その株を十分に保有していません。'); return
+    if not h or h[0]<株数: c.close(); await i.response.send_message('その株を十分に保有していません。', ephemeral=True); return
     remain=h[0]-株数
     if remain:c.execute('UPDATE holdings SET shares=? WHERE user_id=? AND company_id=?',(remain,i.user.id,r[0]))
     else:c.execute('DELETE FROM holdings WHERE user_id=? AND company_id=?',(i.user.id,r[0]))
@@ -154,7 +154,7 @@ async def portfolio(i):
 async def market(i):
     c=db(); rows=c.execute('SELECT name,share_price,profit FROM companies ORDER BY share_price DESC LIMIT 10').fetchall(); news=c.execute('SELECT headline FROM market_news ORDER BY id DESC LIMIT 3').fetchall(); c.close(); text='📈 **KwiiMarket 市場**\n'+('\n'.join(f'• {a} — {yen(b)} / 利益 {yen(d)}' for a,b,d in rows) if rows else 'まだ会社がありません。');
     if news:text+='\n\n📰 **ニュース**\n'+'\n'.join('• '+x[0] for x in news)
-    await i.response.send_message(text)
+    await i.response.send_message(text, ephemeral=True)
 
 @bot.tree.command(name='資産',description='総資産を確認')
 async def assets(i):
