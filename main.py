@@ -476,19 +476,19 @@ async def battle_start(i, 相手: discord.Member):
         await i.response.send_message("⚔️ どちらかがすでにBattle中です。", ephemeral=True); return
 
     c = db()
-    # 同じ相手への重複招待を防ぐ。
-    existing = c.execute("SELECT 1 FROM battle_invites WHERE status='pending' AND ((inviter=? AND invitee=?) OR (inviter=? AND invitee=?))", (i.user.id, 相手.id, 相手.id, i.user.id)).fetchone()
+    # 同じ2人の保留中招待を確認。INSERT側にもUNIQUE INDEXを入れて競合時も二重作成を防ぐ。
+    existing = c.execute("SELECT invite_id FROM battle_invites WHERE status='pending' AND ((inviter=? AND invitee=?) OR (inviter=? AND invitee=?)) LIMIT 1", (i.user.id, 相手.id, 相手.id, i.user.id)).fetchone()
     if existing:
         c.close()
-        await i.response.send_message("📨 すでにその相手へBattle招待を送っています。", ephemeral=True); return
-    invite_id = f"I{i.id}"  # DiscordのInteraction IDを使い、同じ実行が二重になっても同じ招待IDになる
+        await i.response.send_message("📨 すでにその相手へのBattle招待が保留中です。", ephemeral=True); return
+    invite_id = f"I{i.id}"
     try:
         c.execute("INSERT INTO battle_invites(invite_id,inviter,invitee,status,created_at) VALUES(?,?,?,?,?)",
                   (invite_id,i.user.id,相手.id,'pending',datetime.now(timezone.utc).isoformat()))
         c.commit()
     except sqlite3.IntegrityError:
         c.close()
-        await i.response.send_message("📨 このBattle招待はすでに送信処理済みです。", ephemeral=True)
+        await i.response.send_message("📨 すでにその相手へのBattle招待が保留中です。", ephemeral=True)
         return
     c.close()
 
@@ -538,7 +538,12 @@ class BattleInviteView(discord.ui.View):
             return
 
         if not accepted:
-            c.execute("UPDATE battle_invites SET status='rejected' WHERE invite_id=? AND status='pending'", (self.invite_id,))
+            cur = c.execute("UPDATE battle_invites SET status='rejected' WHERE invite_id=? AND status='pending'", (self.invite_id,))
+            if cur.rowcount != 1:
+                c.rollback()
+                c.close()
+                await interaction.response.send_message("⚠️ この招待は別の処理によって確定しました。", ephemeral=True)
+                return
             c.commit()
             c.close()
             self.accept_button.disabled = True
@@ -552,6 +557,7 @@ class BattleInviteView(discord.ui.View):
                 pass
             return
 
+        c = db()
         if battle_get_active(self.inviter_id) or battle_get_active(self.invitee_id):
             c.execute("UPDATE battle_invites SET status='cancelled' WHERE invite_id=? AND status='pending'", (self.invite_id,))
             c.commit()
@@ -568,7 +574,12 @@ class BattleInviteView(discord.ui.View):
             (match_id,player1,player2,player1_topic,player2_topic,questioner,answerer,answerer_topic,turn_user,status,created_at)
             VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
             (match_id,self.inviter_id,self.invitee_id,None,None,questioner,answerer,answerer_topic,questioner,'active',datetime.now(timezone.utc).isoformat()))
-        c.execute("UPDATE battle_invites SET status='accepted' WHERE invite_id=? AND status='pending'", (self.invite_id,))
+        cur = c.execute("UPDATE battle_invites SET status='accepted' WHERE invite_id=? AND status='pending'", (self.invite_id,))
+        if cur.rowcount != 1:
+            c.rollback()
+            c.close()
+            await interaction.response.send_message("⚠️ この招待は別の処理によって確定しました。", ephemeral=True)
+            return
         c.commit()
         c.close()
 
