@@ -510,29 +510,42 @@ class BattleInviteView(discord.ui.View):
         self.invite_id = invite_id
         self.inviter_id = inviter_id
         self.invitee_id = invitee_id
+        # ボタンを明示的に作成して、承認/拒否の処理が入れ替わらないようにする。
+        self.add_item(BattleInviteAcceptButton(self))
+        self.add_item(BattleInviteRejectButton(self))
 
-    async def finish_invite(self, interaction, accepted):
+    async def finish_invite(self, interaction, accepted: bool):
         if interaction.user.id != self.invitee_id:
             await interaction.response.send_message("❌ この招待を操作できるのは招待された本人だけです。", ephemeral=True)
             return
+
         c = db()
         row = c.execute("SELECT status FROM battle_invites WHERE invite_id=?", (self.invite_id,)).fetchone()
         if not row or row[0] != 'pending':
             c.close()
             await interaction.response.send_message("⚠️ この招待はすでに処理済み、または期限切れです。", ephemeral=True)
             return
+
         if not accepted:
-            c.execute("UPDATE battle_invites SET status='rejected' WHERE invite_id=?", (self.invite_id,)); c.commit(); c.close()
-            for child in self.children: child.disabled = True
-            await interaction.response.edit_message(content="🚫 **Battle招待を拒否しました。**", view=self)
+            c.execute("UPDATE battle_invites SET status='rejected' WHERE invite_id=? AND status='pending'", (self.invite_id,))
+            c.commit()
+            c.close()
+            for child in self.children:
+                child.disabled = True
+            await interaction.response.edit_message(content="🚫 **Battle招待を拒否しました。**\nこの対戦は開始されません。", view=self)
             try:
-                await bot.get_user(self.inviter_id).send(f"🚫 **{interaction.user.display_name}** がBattle招待を拒否しました。")
-            except Exception: pass
+                inviter = await bot.fetch_user(self.inviter_id)
+                await inviter.send(f"🚫 **{interaction.user.display_name}** がBattle招待を拒否しました。")
+            except Exception:
+                pass
             return
 
         if battle_get_active(self.inviter_id) or battle_get_active(self.invitee_id):
-            c.execute("UPDATE battle_invites SET status='cancelled' WHERE invite_id=?", (self.invite_id,)); c.commit(); c.close()
-            for child in self.children: child.disabled = True
+            c.execute("UPDATE battle_invites SET status='cancelled' WHERE invite_id=? AND status='pending'", (self.invite_id,))
+            c.commit()
+            c.close()
+            for child in self.children:
+                child.disabled = True
             await interaction.response.edit_message(content="⚠️ どちらかがすでにBattle中のため、開始できませんでした。", view=self)
             return
 
@@ -543,33 +556,51 @@ class BattleInviteView(discord.ui.View):
             (match_id,player1,player2,player1_topic,player2_topic,questioner,answerer,answerer_topic,turn_user,status,created_at)
             VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
             (match_id,self.inviter_id,self.invitee_id,None,None,questioner,answerer,answerer_topic,questioner,'active',datetime.now(timezone.utc).isoformat()))
-        c.execute("UPDATE battle_invites SET status='accepted' WHERE invite_id=?", (self.invite_id,))
-        c.commit(); c.close()
+        c.execute("UPDATE battle_invites SET status='accepted' WHERE invite_id=? AND status='pending'", (self.invite_id,))
+        c.commit()
+        c.close()
 
-        for child in self.children: child.disabled = True
+        for child in self.children:
+            child.disabled = True
         await interaction.response.edit_message(content="✅ **Battle招待を承認しました！Battle開始！**", view=self)
-        q_user = await bot.fetch_user(questioner); a_user = await bot.fetch_user(answerer)
+        q_user = await bot.fetch_user(questioner)
+        a_user = await bot.fetch_user(answerer)
         try:
             await q_user.send(f"⚔️ **Battle開始！**\n対戦相手：**{a_user.display_name}**\n対戦ID：`{match_id}`\n\n❓ **あなたは質問者です！**\n相手のお題を20問以内に当ててください。\n`/battle質問` で質問、`/battle推理` で推理できます。")
             await a_user.send(f"⚔️ **Battle開始！**\n対戦相手：**{q_user.display_name}**\n対戦ID：`{match_id}`\n\n🧠 **あなたは回答者です！**\n🔐 お題：**{answerer_topic}**\n質問されたら `/battle回答` で YES / NO / わからない と答えてください。\n🤔『わからない』は3回までです。")
-        except Exception: pass
+        except Exception:
+            pass
 
     async def on_timeout(self):
-        c = db(); c.execute("UPDATE battle_invites SET status='expired' WHERE invite_id=? AND status='pending'", (self.invite_id,)); c.commit(); c.close()
-        for child in self.children: child.disabled = True
+        c = db()
+        c.execute("UPDATE battle_invites SET status='expired' WHERE invite_id=? AND status='pending'", (self.invite_id,))
+        c.commit()
+        c.close()
+        for child in self.children:
+            child.disabled = True
         try:
             if self.message:
                 await self.message.edit(content="⌛ **Battle招待の期限が切れました。**", view=self)
         except Exception:
             pass
 
-    @discord.ui.button(label='承認', style=discord.ButtonStyle.success, emoji='✅')
-    async def accept(self, interaction, button):
-        await self.finish_invite(interaction, True)
 
-    @discord.ui.button(label='拒否', style=discord.ButtonStyle.danger, emoji='🚫')
-    async def reject(self, interaction, button):
-        await self.finish_invite(interaction, False)
+class BattleInviteAcceptButton(discord.ui.Button):
+    def __init__(self, view):
+        super().__init__(label='承認', style=discord.ButtonStyle.success, emoji='✅')
+        self.invite_view = view
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.invite_view.finish_invite(interaction, True)
+
+
+class BattleInviteRejectButton(discord.ui.Button):
+    def __init__(self, view):
+        super().__init__(label='拒否', style=discord.ButtonStyle.danger, emoji='🚫')
+        self.invite_view = view
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.invite_view.finish_invite(interaction, False)
 
 
 @bot.tree.command(name='battle質問', description='相手のお題を推理する質問を送る')
