@@ -352,7 +352,10 @@ def init_battle_tables():
         forced_unknown_user INTEGER,
         hidden_hint_user INTEGER,
         pending_change_user INTEGER,
-        force_binary_user INTEGER
+        force_binary_user INTEGER,
+        total_questions INTEGER NOT NULL DEFAULT 0,
+        player1_unknowns INTEGER NOT NULL DEFAULT 0,
+        player2_unknowns INTEGER NOT NULL DEFAULT 0
     )""")
     # v6/v7 の既存DBから安全に移行。
     existing = {row[1] for row in c.execute("PRAGMA table_info(battle_matches)").fetchall()}
@@ -364,6 +367,9 @@ def init_battle_tables():
         "hidden_hint_user": "INTEGER",
         "pending_change_user": "INTEGER",
         "force_binary_user": "INTEGER",
+        "total_questions": "INTEGER NOT NULL DEFAULT 0",
+        "player1_unknowns": "INTEGER NOT NULL DEFAULT 0",
+        "player2_unknowns": "INTEGER NOT NULL DEFAULT 0",
     }
     for col, definition in migrations.items():
         if col not in existing:
@@ -464,7 +470,7 @@ async def battle_start(i, 相手: discord.Member):
     await i.response.send_message(
         f"⚔️ **Battle開始！**\n対戦相手：**{相手.display_name}**\n対戦ID：`{match_id}`\n\n"
         f"🧠 あなたのお題はBotが秘密裏に決定しました。\n"
-        f"❓ あなたが先攻です。`/battle質問` で質問してください。\n"
+        f"❓ あなたが先攻です。`/battle質問` で質問してください。\n📊 全体で最大20問。『わからない』は1人3回まで。\n"
         f"🎯 `/battle推理` でいつでも推理できます。\n"
         f"🎒 アイテムは `/battleアイテム` と `/battleアイテム使用` から使えます。",
         ephemeral=True)
@@ -472,7 +478,7 @@ async def battle_start(i, 相手: discord.Member):
         await 相手.send(
             f"⚔️ **Battle開始！**\n対戦相手：**{i.user.display_name}**\n対戦ID：`{match_id}`\n\n"
             f"🧠 あなたのお題はBotが秘密裏に決定しました。\n"
-            f"⏳ 相手が先攻です。質問が届くまで待ってください。\n"
+            f"⏳ 相手が先攻です。質問が届くまで待ってください。\n📊 全体で最大20問。『わからない』は1人3回まで。\n"
             f"🎯 `/battle推理` でいつでも推理できます。")
     except Exception:
         pass
@@ -488,15 +494,15 @@ async def battle_question(i, 質問: str):
     if len(質問.strip()) < 1 or len(質問) > 120:
         await i.response.send_message("❌ 質問は1～120文字です。", ephemeral=True); return
     p1q,p2q = match[7],match[8]
-    count = p1q if match[1] == i.user.id else p2q
-    if count >= 20:
-        await i.response.send_message("❌ 1人20問までです。", ephemeral=True); return
+    total_q = (match[7] or 0) + (match[8] or 0)
+    if total_q >= 20:
+        await i.response.send_message("❌ このBattleの質問回数は20問までです。", ephemeral=True); return
     other = battle_other(match,i.user.id)
     c = db()
     if match[1] == i.user.id:
-        c.execute("UPDATE battle_matches SET player1_questions=player1_questions+1,turn_user=?,last_question=?,last_question_from=? WHERE match_id=?", (other,質問.strip(),i.user.id,match[0]))
+        c.execute("UPDATE battle_matches SET player1_questions=player1_questions+1,total_questions=total_questions+1,turn_user=?,last_question=?,last_question_from=? WHERE match_id=?", (other,質問.strip(),i.user.id,match[0]))
     else:
-        c.execute("UPDATE battle_matches SET player2_questions=player2_questions+1,turn_user=?,last_question=?,last_question_from=? WHERE match_id=?", (other,質問.strip(),i.user.id,match[0]))
+        c.execute("UPDATE battle_matches SET player2_questions=player2_questions+1,total_questions=total_questions+1,turn_user=?,last_question=?,last_question_from=? WHERE match_id=?", (other,質問.strip(),i.user.id,match[0]))
     c.commit(); c.close()
     await i.response.send_message(f"❓ 質問を送信しました。\n> {質問.strip()}\n\n相手の回答を待っています。", ephemeral=True)
     try:
@@ -527,9 +533,34 @@ async def battle_answer(i, 回答: app_commands.Choice[str]):
         return
     if forced_unknown:
         answer = "UNKNOWN"
+    unknowns = match[19] if match[1] == i.user.id else match[20]
+    if answer == "UNKNOWN" and not forced_unknown and unknowns >= 3:
+        await i.response.send_message("⚠️ この試合では『わからない』は3回までです。YES / NOで回答してください。", ephemeral=True)
+        return
     extra = match[13] == i.user.id
+    total_q = match[7] + match[8]
     c = db()
+    if answer == "UNKNOWN" and not forced_unknown:
+        if match[1] == i.user.id:
+            c.execute("UPDATE battle_matches SET player1_unknowns=player1_unknowns+1 WHERE match_id=?", (match[0],))
+        else:
+            c.execute("UPDATE battle_matches SET player2_unknowns=player2_unknowns+1 WHERE match_id=?", (match[0],))
     c.execute("UPDATE battle_matches SET forced_unknown_user=NULL,force_binary_user=NULL WHERE match_id=?", (match[0],))
+    if total_q >= 20:
+        c.execute("UPDATE battle_matches SET status='finished',winner=? WHERE match_id=?", (i.user.id,match[0]))
+        c.commit(); c.close()
+        delta = battle_change_rating(i.user.id, battle_other(match,i.user.id))
+        item_type,item_name = give_battle_item(i.user.id)
+        await i.response.send_message(f"🏁 **20問終了！**\n回答者の **{i.user.display_name}** さんの勝利です。\n🏆 **+{delta} Rating** / +100 Battle Point\n🎁 **{item_type}：{item_name}** を獲得！", ephemeral=True)
+        try:
+            await (await bot.fetch_user(match[12])).send(f"🏁 Battle `{match[0]}` は20問終了！\n回答者の勝利です。")
+        except Exception:
+            pass
+        try:
+            await (await bot.fetch_user(battle_other(match,i.user.id))).send(f"🏁 Battle `{match[0]}` は20問終了！\nあなたの勝利です。\n🏆 +{delta} Rating / +100 Battle Point")
+        except Exception:
+            pass
+        return
     if extra:
         c.execute("UPDATE battle_matches SET extra_question_user=NULL,turn_user=? WHERE match_id=?", (i.user.id,match[0]))
     else:
