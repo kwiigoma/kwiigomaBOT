@@ -1,4 +1,4 @@
-# kwiigonaBOT v8
+# kwiigonaBOT v9.6
 # Botの返信はすべてエフェメラル（実行者本人のみ表示）。
 # 会社削除・チャンネル削除を追加。
 import os, random, sqlite3, math
@@ -14,7 +14,9 @@ DB_FILE = 'kwiigona.db'
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-TOPICS = {'ゲーム実況':(1.10,1.00),'Roblox':(1.15,.95),'Minecraft':(1.12,.98),'PC・ガジェット':(.92,.88),'ゲーム解説':(.90,.82),'ゆっくり実況':(1.05,.92),'料理':(.98,1.00),'Vlog':(.90,1.02),'エンタメ':(1.08,1.08)}
+TOPICS = {'ゲーム実況':(1.05,1.00),'Roblox':(1.08,1.05),'Minecraft':(1.10,1.02),'PC・ガジェット':(.86,.96),'ゲーム解説':(.88,1.08),'ゆっくり実況':(.96,1.10),'料理':(.92,1.00),'Vlog':(.82,1.08),'エンタメ':(1.02,1.12)}
+JST = timezone(timedelta(hours=9))
+def today_jst(): return datetime.now(JST).date()
 SECTORS = {'ゲーム':1.08,'IT':1.06,'食品':1.00,'小売':.98,'製造':.97,'エンタメ':1.05,'運輸':.96,'エネルギー':.94}
 REWARDS=[('N','普通のごま',100,0),('N','ごまクッキー',150,0),('N','ごまパン',200,0),('R','金ごま',500,1),('R','黒ごま宝石',800,1),('SR','幻のごま',2000,1),('SR','ごま王の印',5000,1),('UR','伝説のごま',20000,1)]
 NEWS=[('ゲーム業界で大型タイトルが発表されました。','ゲーム',1.08),('IT業界で新技術が話題になりました。','IT',1.07),('食品原材料の価格が上昇しました。','食品',.94),('消費が活発になりました。','小売',1.05),('製造コストが上昇しました。','製造',.94),('エンタメ市場が盛り上がりました。','エンタメ',1.07),('燃料価格が上昇しました。','運輸',.95),('エネルギー需要が低下しました。','エネルギー',.95)]
@@ -26,6 +28,16 @@ def init_db():
     x.execute('CREATE TABLE IF NOT EXISTS gomalog(user_id INTEGER PRIMARY KEY,last_date TEXT,streak INTEGER DEFAULT 0,max_streak INTEGER DEFAULT 0,total_claims INTEGER DEFAULT 0,total_rares INTEGER DEFAULT 0)')
     x.execute('CREATE TABLE IF NOT EXISTS collections(user_id INTEGER,item TEXT,count INTEGER DEFAULT 0,PRIMARY KEY(user_id,item))')
     x.execute('CREATE TABLE IF NOT EXISTS youtubers(user_id INTEGER PRIMARY KEY,subscribers INTEGER DEFAULT 0,views INTEGER DEFAULT 0,likes INTEGER DEFAULT 0,comments INTEGER DEFAULT 0,videos INTEGER DEFAULT 0,shorts INTEGER DEFAULT 0,revenue INTEGER DEFAULT 0,energy INTEGER DEFAULT 100,last_action TEXT)')
+    x.execute('CREATE TABLE IF NOT EXISTS yt_videos(user_id INTEGER,posted_at TEXT,shorts INTEGER DEFAULT 0,views INTEGER DEFAULT 0,watch_minutes INTEGER DEFAULT 0,impressions INTEGER DEFAULT 0,ctr REAL DEFAULT 0,retention REAL DEFAULT 0,satisfaction REAL DEFAULT 0,subscribers_gained INTEGER DEFAULT 0,revenue INTEGER DEFAULT 0)')
+    # 新しいYouTubeシミュレーション用の列を既存DBへ安全に追加
+    existing={r[1] for r in x.execute('PRAGMA table_info(youtubers)').fetchall()}
+    for col,definition in {
+        'watch_minutes':'INTEGER DEFAULT 0','impressions':'INTEGER DEFAULT 0','returning_viewers':'INTEGER DEFAULT 0',
+        'avg_ctr':'REAL DEFAULT 0','avg_retention':'REAL DEFAULT 0','avg_satisfaction':'REAL DEFAULT 0',
+        'planning_skill':'INTEGER DEFAULT 10','editing_skill':'INTEGER DEFAULT 10','thumbnail_skill':'INTEGER DEFAULT 10','communication_skill':'INTEGER DEFAULT 10',
+        'upload_streak':'INTEGER DEFAULT 0','last_upload_date':'TEXT','monetized':'INTEGER DEFAULT 0'
+    }.items():
+        if col not in existing: x.execute(f'ALTER TABLE youtubers ADD COLUMN {col} {definition}')
     x.execute('CREATE TABLE IF NOT EXISTS companies(id INTEGER PRIMARY KEY AUTOINCREMENT,owner_id INTEGER,name TEXT UNIQUE,sector TEXT,cash INTEGER DEFAULT 500000,revenue INTEGER DEFAULT 0,profit INTEGER DEFAULT 0,reputation INTEGER DEFAULT 50,employees INTEGER DEFAULT 5,shares INTEGER DEFAULT 10000,share_price INTEGER DEFAULT 100,listed INTEGER DEFAULT 1,created_at TEXT)')
     x.execute('CREATE TABLE IF NOT EXISTS holdings(user_id INTEGER,company_id INTEGER,shares INTEGER DEFAULT 0,avg_price REAL DEFAULT 0,PRIMARY KEY(user_id,company_id))')
     x.execute('CREATE TABLE IF NOT EXISTS market_news(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at TEXT,headline TEXT,sector TEXT,impact REAL)')
@@ -60,9 +72,10 @@ async def money_cmd(i): ensure_user(i.user); await i.response.send_message(f'�
 
 @bot.tree.command(name='gomalog',description='今日のログイン報酬を受け取る')
 async def gomalog(i):
-    ensure_user(i.user); today=date.today().isoformat(); c=db(); x=c.cursor(); r=x.execute('SELECT last_date,streak FROM gomalog WHERE user_id=?',(i.user.id,)).fetchone()
+    ensure_user(i.user); today=today_jst().isoformat(); c=db(); x=c.cursor(); r=x.execute('SELECT last_date,streak FROM gomalog WHERE user_id=?',(i.user.id,)).fetchone()
     if r and r[0]==today: c.close(); await i.response.send_message('🎁 今日はもう受け取っています。',ephemeral=True); return
-    streak=(r[1]+1) if r and r[0] and date.fromisoformat(r[0])==date.today()-timedelta(days=1) else 1
+    # 日本時間の暦日で判定。1日でも空けば必ず1日目に戻る。
+    streak=(r[1]+1) if r and r[0] and date.fromisoformat(r[0])==today_jst()-timedelta(days=1) else 1
     grade,item,reward,rare=weighted_reward()
     x.execute('INSERT INTO gomalog(user_id,last_date,streak,max_streak,total_claims,total_rares) VALUES(?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET last_date=excluded.last_date,streak=excluded.streak,max_streak=MAX(gomalog.max_streak,excluded.streak),total_claims=gomalog.total_claims+1,total_rares=gomalog.total_rares+excluded.total_rares',(i.user.id,today,streak,streak,1,rare))
     x.execute('INSERT INTO collections(user_id,item,count) VALUES(?,?,1) ON CONFLICT(user_id,item) DO UPDATE SET count=count+1',(i.user.id,item)); c.commit(); c.close();
@@ -80,21 +93,106 @@ async def gl_collection(i):
 
 @bot.tree.command(name='yt_start',description='くぃチューバーを開始')
 async def yt_start(i): ensure_user(i.user); yt(i.user.id); await i.response.send_message('🎥 くぃチューバー開始！登録者0人からスタートです。', ephemeral=True)
-@bot.tree.command(name='yt_status',description='チャンネル情報')
+@bot.tree.command(name='yt_status',description='チャンネル情報・YouTube Studio風アナリティクス')
 async def yt_status(i):
-    ensure_user(i.user); r=yt(i.user.id); e=discord.Embed(title=f'🎥 {i.user.display_name} のチャンネル'); labels=['登録者','総再生','高評価','コメント','動画','Shorts','収益','体力']; vals=[f'{r[0]:,}人',f'{r[1]:,}回',f'{r[2]:,}',f'{r[3]:,}',f'{r[4]:,}',f'{r[5]:,}',yen(r[6]),f'{r[7]}/100']
-    for a,b in zip(labels,vals): e.add_field(name=a,value=b)
+    ensure_user(i.user); r=yt(i.user.id)
+    c=db()
+    extra=c.execute('SELECT watch_minutes,impressions,returning_viewers,avg_ctr,avg_retention,avg_satisfaction,planning_skill,editing_skill,thumbnail_skill,communication_skill,upload_streak,last_upload_date,monetized FROM youtubers WHERE user_id=?',(i.user.id,)).fetchone()
+    long_watch=c.execute("SELECT COALESCE(SUM(watch_minutes),0) FROM yt_videos WHERE user_id=? AND shorts=0 AND posted_at>=?",(i.user.id,(datetime.now(JST)-timedelta(days=365)).isoformat())).fetchone()[0]
+    shorts90=c.execute("SELECT COALESCE(SUM(views),0) FROM yt_videos WHERE user_id=? AND shorts=1 AND posted_at>=?",(i.user.id,(datetime.now(JST)-timedelta(days=90)).isoformat())).fetchone()[0]
+    recent=c.execute("SELECT views,ctr,retention,satisfaction FROM yt_videos WHERE user_id=? ORDER BY posted_at DESC LIMIT 5",(i.user.id,)).fetchall(); c.close()
+    w,i_imp,returning,ctr,ret,sat,plan,edit,thumb,comm,ustreak,last,monetized=extra
+    eligible_long=r[0]>=1000 and long_watch>=240000
+    eligible_shorts=r[0]>=1000 and shorts90>=10_000_000
+    e=discord.Embed(title=f'🎥 {i.user.display_name} のYouTube Studio')
+    e.add_field(name='👥 登録者',value=f'{r[0]:,}人',inline=True)
+    e.add_field(name='👁️ 総再生',value=f'{r[1]:,}回',inline=True)
+    e.add_field(name='🎬 投稿数',value=f'{r[4]:,}本（Shorts {r[5]:,}）',inline=True)
+    e.add_field(name='⏱️ 総再生時間',value=f'{w/60:,.1f}時間',inline=True)
+    e.add_field(name='📈 平均CTR',value=f'{ctr:.1f}%',inline=True)
+    e.add_field(name='📉 平均視聴維持率',value=f'{ret:.1f}%',inline=True)
+    e.add_field(name='😊 平均満足度',value=f'{sat:.1f}/100',inline=True)
+    e.add_field(name='💰 YouTube収益',value=yen(r[6]),inline=True)
+    e.add_field(name='⚡ 制作体力',value=f'{r[7]}/100',inline=True)
+    e.add_field(name='🛠️ スキル',value=f'企画 {plan} / 編集 {edit}\nサムネ {thumb} / 話術 {comm}',inline=False)
+    e.add_field(name='🔥 投稿連続',value=f'{ustreak}日',inline=True)
+    status='収益化済み' if monetized else ('収益化条件到達（審査待ち）' if eligible_long or eligible_shorts else '未収益化')
+    e.add_field(name='💵 収益化',value=status,inline=True)
+    e.add_field(name='🎯 収益化進捗',value=f'長尺: {long_watch/60:,.1f}/4,000時間\nShorts: {shorts90:,}/10,000,000回',inline=False)
+    if recent:
+        e.add_field(name='🧪 直近5本',value='\n'.join(f'• {v:,}再生 / CTR {ct:.1f}% / 維持 {rt:.1f}% / 満足 {ss:.0f}' for v,ct,rt,ss in recent),inline=False)
     await i.response.send_message(embed=e, ephemeral=True)
-@bot.tree.command(name='yt_post',description='動画を投稿')
+
+@bot.tree.command(name='yt_post',description='動画を投稿（本格シミュレーション）')
 @app_commands.describe(topic='動画ジャンル',shorts='Shortsかどうか')
 @app_commands.choices(topic=[app_commands.Choice(name=x,value=x) for x in TOPICS])
 async def yt_post(i,topic:app_commands.Choice[str],shorts:bool=False):
-    ensure_user(i.user); r=yt(i.user.id); cost=10 if shorts else 20
-    if r[7]<cost: await i.response.send_message('⚡ 体力不足です。/yt_train で回復してください。',ephemeral=True); return
-    interest,competition=TOPICS[topic.value]; base=random.randint(50,300) if shorts else random.randint(80,500); views=max(1,int(base*interest*random.uniform(.75,1.35)/competition*(1+math.log10(r[0]+10)*.25))); likes=int(views*random.uniform(.035,.09)); comments=int(views*random.uniform(.002,.012)); subs=max(0,int(views*random.uniform(.005,.02))); rev=int(views*(.12 if shorts else .35)); c=db(); c.execute('UPDATE youtubers SET subscribers=subscribers+?,views=views+?,likes=likes+?,comments=comments+?,videos=videos+1,shorts=shorts+?,revenue=revenue+?,energy=energy-? WHERE user_id=?',(subs,views,likes,comments,int(shorts),rev,cost,i.user.id)); c.commit(); c.close(); change_money(i.user.id,rev)
-    await i.response.send_message(f'🎬 **投稿完了**\nジャンル：{topic.value}\n再生：**{views:,}回**\n高評価：**{likes:,}**\nコメント：**{comments:,}**\n登録者：**+{subs:,}人**\n収益：**{yen(rev)}**', ephemeral=True)
-@bot.tree.command(name='yt_train',description='制作トレーニング')
-async def yt_train(i): yt(i.user.id); c=db(); c.execute('UPDATE youtubers SET energy=MIN(100,energy+30) WHERE user_id=?',(i.user.id,)); c.commit(); c.close(); await i.response.send_message('💪 体力が30回復しました。', ephemeral=True)
+    ensure_user(i.user); r=yt(i.user.id); c=db()
+    row=c.execute('SELECT planning_skill,editing_skill,thumbnail_skill,communication_skill,upload_streak,last_upload_date,monetized FROM youtubers WHERE user_id=?',(i.user.id,)).fetchone(); c.close()
+    if row is None:
+        await i.response.send_message('🎥 先に /yt_start でチャンネルを開始してください。',ephemeral=True); return
+    plan,edit,thumb,comm,ustreak,last,monetized=row; cost=18 if shorts else 30
+    if r[7]<cost:
+        await i.response.send_message(f'⚡ 制作体力が足りません。必要：{cost} / 現在：{r[7]}\n/yt_train で制作力を鍛えてください。',ephemeral=True); return
+    today=today_jst(); last_d=date.fromisoformat(last) if last else None
+    new_streak=ustreak+1 if last_d==today-timedelta(days=1) else 1
+    interest,competition=TOPICS[topic.value]
+    skill=(plan+edit+thumb+comm)/4
+    # 新規チャンネルは露出が少なく、競争の強いジャンルではさらに厳しい。大当たりもあるが頻度は低い。
+    channel_trust=min(1.8,0.55+math.log10(r[0]+10)*0.28)
+    audience_fit=max(0.55,min(1.35,0.72+skill/170+random.uniform(-0.12,0.12)))
+    quality=max(0.35,min(1.55,0.45+skill/100+random.uniform(-0.18,0.18)))
+    base_impressions=random.randint(80,900) if r[0]<100 else random.randint(300,2500)
+    if shorts: base_impressions=int(base_impressions*random.uniform(0.8,1.8))
+    impressions=max(20,int(base_impressions*interest/competition*channel_trust*audience_fit*quality))
+    ctr=max(1.2,min(14.0,3.0+thumb*0.075+plan*0.025+random.uniform(-1.5,1.5)))
+    if r[0]<100: ctr*=random.uniform(0.75,1.0)
+    views=max(1,int(impressions*ctr/100))
+    retention=max(12.0,min(88.0,22+edit*0.42+comm*0.16+plan*0.10+random.uniform(-9,9)))
+    if shorts: retention=max(20,min(95,retention+8))
+    satisfaction=max(10,min(100,retention*0.72+quality*12+random.uniform(-8,8)))
+    watch_minutes=max(1,int(views*(retention/100)*(2.8 if shorts else random.uniform(5.0,9.0))))
+    likes=max(0,int(views*max(0.01,min(0.15,satisfaction/1000+random.uniform(-.01,.02)))))
+    comments=max(0,int(views*random.uniform(.001,.009)*(satisfaction/70)))
+    sub_rate=max(.0005,min(.035,(satisfaction-35)/2200 + ctr/10000 + random.uniform(-.0015,.002)))
+    subs=max(0,int(views*sub_rate))
+    # 収益は広告収益化後だけ。条件到達した動画自身は審査前として0円、次回以降から収益化。
+    rev=0
+    was_monetized=bool(monetized)
+    new_monetized=bool(monetized)
+    posted_at=datetime.now(JST).isoformat()
+    c=db()
+    c.execute('INSERT INTO yt_videos(user_id,posted_at,shorts,views,watch_minutes,impressions,ctr,retention,satisfaction,subscribers_gained,revenue) VALUES(?,?,?,?,?,?,?,?,?,?,?)',(i.user.id,posted_at,int(shorts),views,watch_minutes,impressions,ctr,retention,satisfaction,subs,rev))
+    c.execute('UPDATE youtubers SET subscribers=subscribers+?,views=views+?,likes=likes+?,comments=comments+?,videos=videos+1,shorts=shorts+?,revenue=revenue+?,energy=energy-?,watch_minutes=watch_minutes+?,impressions=impressions+?,returning_viewers=returning_viewers+?,avg_ctr=?,avg_retention=?,avg_satisfaction=?,upload_streak=?,last_upload_date=? WHERE user_id=?',(subs,views,likes,comments,int(shorts),rev,cost,watch_minutes,impressions,int(views*max(0,satisfaction-60)/100),ctr,retention,satisfaction,new_streak,today.isoformat(),i.user.id))
+    c.commit()
+    long_watch=c.execute("SELECT COALESCE(SUM(watch_minutes),0) FROM yt_videos WHERE user_id=? AND shorts=0 AND posted_at>=?",(i.user.id,(datetime.now(JST)-timedelta(days=365)).isoformat())).fetchone()[0]
+    shorts90=c.execute("SELECT COALESCE(SUM(views),0) FROM yt_videos WHERE user_id=? AND shorts=1 AND posted_at>=?",(i.user.id,(datetime.now(JST)-timedelta(days=90)).isoformat())).fetchone()[0]
+    total_subs=c.execute('SELECT subscribers FROM youtubers WHERE user_id=?',(i.user.id,)).fetchone()[0]
+    if total_subs>=1000 and (long_watch>=240000 or shorts90>=10_000_000):
+        c.execute('UPDATE youtubers SET monetized=1 WHERE user_id=?',(i.user.id,)); new_monetized=1
+    c.commit(); c.close()
+    if was_monetized:
+        # シミュレーション上の広告収益。実際のYouTubeのRPMは固定ではないため、動画ごとに変動させる。
+        rev=max(0,int(views*random.uniform(.08,.45)))
+        add_youtube_money(i.user.id,rev)
+        c=db(); c.execute('UPDATE youtubers SET revenue=revenue+? WHERE user_id=?',(rev,i.user.id)); c.commit(); c.close()
+    else: rev=0
+    verdict='🔥 大当たり' if views>=max(5000,impressions*0.5) else ('📈 好調' if satisfaction>=70 else ('😐 普通' if satisfaction>=45 else '💀 伸び悩み'))
+    await i.response.send_message(f'🎬 **投稿結果**\nジャンル：**{topic.value}** / {"Shorts" if shorts else "長尺"}\n{verdict}\n\n👁️ インプレッション：**{impressions:,}**\n▶️ 再生：**{views:,}回**\n🖱️ CTR：**{ctr:.1f}%**\n📉 視聴維持率：**{retention:.1f}%**\n😊 満足度：**{satisfaction:.0f}/100**\n👍 高評価：**{likes:,}**　💬 コメント：**{comments:,}**\n👥 登録者：**+{subs:,}人**\n⏱️ 再生時間：**{watch_minutes:,}分**\n💴 収益：**{yen(rev)}**\n🔥 投稿連続：**{new_streak}日**', ephemeral=True)
+
+@bot.tree.command(name='yt_train',description='制作スキルを鍛える')
+@app_commands.describe(分野='鍛える分野')
+@app_commands.choices(分野=[app_commands.Choice(name='企画',value='planning'),app_commands.Choice(name='編集',value='editing'),app_commands.Choice(name='サムネ',value='thumbnail'),app_commands.Choice(name='話術',value='communication')])
+async def yt_train(i,分野:app_commands.Choice[str]=None):
+    ensure_user(i.user); yt(i.user.id); c=db(); row=c.execute('SELECT energy,planning_skill,editing_skill,thumbnail_skill,communication_skill FROM youtubers WHERE user_id=?',(i.user.id,)).fetchone()
+    if not row: c.close(); await i.response.send_message('🎥 先に /yt_start でチャンネルを開始してください。',ephemeral=True); return
+    energy,plan,edit,thumb,comm=row
+    if energy>=90: c.close(); await i.response.send_message('⚡ 体力が十分です。まず動画制作を進めましょう。',ephemeral=True); return
+    field=(分野.value if 分野 else random.choice(['planning','editing','thumbnail','communication']))
+    col={'planning':'planning_skill','editing':'editing_skill','thumbnail':'thumbnail_skill','communication':'communication_skill'}[field]
+    c.execute(f'UPDATE youtubers SET energy=MIN(100,energy+22), {col}=MIN(100,{col}+?) WHERE user_id=?',(random.randint(2,5),i.user.id)); c.commit(); c.close()
+    names={'planning':'企画','editing':'編集','thumbnail':'サムネ','communication':'話術'}
+    await i.response.send_message(f'💪 **{names[field]}トレーニング完了！**\n体力：+22\nスキル：+2～5\n動画の企画・制作品質に影響します。',ephemeral=True)
 
 @bot.tree.command(name='会社設立',description='会社を設立')
 @app_commands.describe(会社名='会社名',業種='業種')
